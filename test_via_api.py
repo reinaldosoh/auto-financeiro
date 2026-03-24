@@ -7,6 +7,7 @@ BASE_URL = "https://reinaldo-automachine.sw5bxa.easypanel.host"
 
 EMAIL = "1Fidelidade@ubizcar.com"
 SENHA = "Gina2405alecio@10"
+CHAVE_SECRETA = "VU3EDQM4TG7TDUCGBZTWQG5TAJCBSKFJ"
 
 
 def cadastrar_banner(imagem_path: str, link_anuncio: str):
@@ -17,6 +18,7 @@ def cadastrar_banner(imagem_path: str, link_anuncio: str):
     payload = {
         "email": EMAIL,
         "senha": SENHA,
+        "chave_secreta": CHAVE_SECRETA,
         "headless": True,
         "manter_aberto": False,
         "imagem_base64": imagem_b64,
@@ -36,6 +38,7 @@ def remover_banner():
     payload = {
         "email": EMAIL,
         "senha": SENHA,
+        "chave_secreta": CHAVE_SECRETA,
         "headless": True,
         "manter_aberto": False,
     }

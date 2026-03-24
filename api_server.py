@@ -45,6 +45,14 @@ class CredenciaisInput(BaseModel):
     headless: bool = False
     manter_aberto: bool = True
 
+class RemoverAnuncioInput(BaseModel):
+    email: str
+    senha: str
+    chave_secreta: str = None
+    headless: bool = True
+    manter_aberto: bool = False
+
+
 class AnuncioMotoristaInput(BaseModel):
     email: str
     senha: str
@@ -261,7 +269,7 @@ async def anuncio_motorista(input_data: AnuncioMotoristaInput):
 
 
 @app.post("/remover-anuncio", response_model=ResultadoOutput)
-async def remover_anuncio(creds: CredenciaisInput):
+async def remover_anuncio(creds: RemoverAnuncioInput):
     """
     Faz login, navega para Recursos Premium e remove o anúncio ativo
     na seção 'Adicionar anúncio na tela inicial do app motorista'.
@@ -274,6 +282,7 @@ async def remover_anuncio(creds: CredenciaisInput):
         executar_remover_anuncio_motorista,
         email=creds.email,
         senha=creds.senha,
+        chave_secreta=creds.chave_secreta,
         headless=creds.headless,
         manter_aberto=creds.manter_aberto,
     )
