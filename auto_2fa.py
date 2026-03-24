@@ -967,13 +967,13 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
 
         time.sleep(2)
 
-        # 2. Clicar em "Adicionar novo anúncio" (que aparece após selecionar Sim)
-        # Primeiro verifica se o file input já está visível
+        # 2. Clicar em "Adicionar novo anúncio" se file input não estiver visível
+        # Usa is_displayed() para distinguir elementos no DOM mas ocultos (display:none)
         file_input_visible = False
         try:
-            driver.find_element(By.ID, "upload-anuncio-tela_inicial_app_taxista-0")
-            file_input_visible = True
-            print("[INFO] File input já visível, pulando botão 'Adicionar'.")
+            elem = driver.find_element(By.ID, "upload-anuncio-tela_inicial_app_taxista-0")
+            file_input_visible = elem.is_displayed()
+            print(f"[INFO] File input no DOM, visível={file_input_visible}.")
         except Exception:
             pass
 
@@ -984,27 +984,37 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
                 )
                 driver.execute_script("arguments[0].click();", add_btn)
                 print("[INFO] Clicou em 'Adicionar novo anúncio'.")
-                time.sleep(2)
+                time.sleep(3)
             except Exception as e:
                 print(f"[ERROR] Botão 'Adicionar novo anúncio' não encontrado: {e}")
-                return {"sucesso": False, "mensagem": "Seção de upload não apareceu após clicar em 'Sim'. Verifique o fluxo da página."}
+                return {"sucesso": False, "mensagem": "Seção de upload não apareceu após clicar em 'Sim'."}
 
-        # 3. Adicionar imagem
+        # 3. Adicionar imagem — garante que o input está visível antes do send_keys
         try:
             file_input = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.ID, "upload-anuncio-tela_inicial_app_taxista-0"))
             )
+            # Força visibilidade para garantir que send_keys funcione em headless
+            driver.execute_script(
+                "arguments[0].style.display='block'; arguments[0].style.visibility='visible'; "
+                "arguments[0].style.opacity='1'; arguments[0].removeAttribute('hidden');",
+                file_input
+            )
             file_input.send_keys(imagem_path)
-            print("[INFO] Arquivo selecionado. Aguardando upload AJAX concluir...")
-            # Aguarda o campo de URL aparecer — ele só existe após o upload AJAX terminar
+            # Dispara evento change para acionar upload AJAX em headless
+            driver.execute_script(
+                "arguments[0].dispatchEvent(new Event('change', { bubbles: true }));",
+                file_input
+            )
+            print("[INFO] Arquivo enviado + evento change disparado. Aguardando upload AJAX...")
+            # Aguarda o campo de URL aparecer como confirmação de upload concluído
             try:
                 WebDriverWait(driver, 30).until(
-                    EC.presence_of_element_located((By.ID, "AnuncioAppTaxista_0_url_anuncio"))
+                    EC.visibility_of_element_located((By.ID, "AnuncioAppTaxista_0_url_anuncio"))
                 )
-                print("[INFO] Upload confirmado: campo de URL detectado.")
+                print("[INFO] Upload confirmado: campo de URL visível.")
             except Exception:
-                # Fallback: aguarda mais tempo e tenta mesmo assim
-                print("[WARNING] Campo URL não detectado após 30s, aguardando 10s extras...")
+                print("[WARNING] Campo URL não apareceu em 30s, aguardando 10s extras...")
                 time.sleep(10)
         except Exception as e:
             print(f"[ERROR] Falha ao adicionar imagem: {e}")
