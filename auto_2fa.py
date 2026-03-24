@@ -948,28 +948,46 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
     try:
         # 1. Selecionar 'Sim' para 'Adicionar anúncio na tela inicial do app motorista'
         try:
-            elm_sim = WebDriverWait(driver, 5).until(
+            WebDriverWait(driver, 5).until(
                 EC.presence_of_element_located((By.ID, "AnuncioAppTaxista_exibir_anuncio_0"))
             )
-            driver.execute_script("arguments[0].click();", elm_sim)
+            # Dispara click + change + input para garantir que os handlers JS executem em headless
+            driver.execute_script("""
+                var el = document.getElementById('AnuncioAppTaxista_exibir_anuncio_0');
+                if (el) {
+                    el.checked = true;
+                    ['click','change','input'].forEach(function(evt) {
+                        el.dispatchEvent(new Event(evt, { bubbles: true }));
+                    });
+                }
+            """)
+            print("[INFO] Radio 'Sim' selecionado + eventos disparados.")
         except Exception as e:
-            print(f"[WARNING] Não foi possível clicar em 'Sim' para exibir anúncio motorista. {e}")
+            print(f"[WARNING] Não foi possível clicar em 'Sim': {e}")
 
-        time.sleep(1)
+        time.sleep(2)
 
-        # 2. Clicar em "Adicionar novo anúncio" (que aparece ou está lá)
+        # 2. Clicar em "Adicionar novo anúncio" (que aparece após selecionar Sim)
+        # Primeiro verifica se o file input já está visível
+        file_input_visible = False
         try:
-            # Tenta verificar se o input já existe
             driver.find_element(By.ID, "upload-anuncio-tela_inicial_app_taxista-0")
-        except:
+            file_input_visible = True
+            print("[INFO] File input já visível, pulando botão 'Adicionar'.")
+        except Exception:
+            pass
+
+        if not file_input_visible:
             try:
-                add_btn = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.ID, "adicionar-novo-anuncio-tela_inicial_app_taxista"))
+                add_btn = WebDriverWait(driver, 8).until(
+                    EC.element_to_be_clickable((By.ID, "adicionar-novo-anuncio-tela_inicial_app_taxista"))
                 )
                 driver.execute_script("arguments[0].click();", add_btn)
+                print("[INFO] Clicou em 'Adicionar novo anúncio'.")
                 time.sleep(2)
             except Exception as e:
-                print(f"[ERROR] Botão 'Adicionar novo anúncio' falhou: {e}")
+                print(f"[ERROR] Botão 'Adicionar novo anúncio' não encontrado: {e}")
+                return {"sucesso": False, "mensagem": "Seção de upload não apareceu após clicar em 'Sim'. Verifique o fluxo da página."}
 
         # 3. Adicionar imagem
         try:
