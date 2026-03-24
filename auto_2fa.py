@@ -946,73 +946,66 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
     print("[INFO] Configurando anúncio na tela inicial do app motorista")
     
     try:
-        # 1. Selecionar 'Sim' para 'Adicionar anúncio na tela inicial do app motorista'
+        UPLOAD_INPUT_ID = "upload-anuncio-tela_inicial_app_taxista-0"
+        ADD_BTN_ID      = "adicionar-novo-anuncio-tela_inicial_app_taxista"
+
+        # 1. Selecionar 'Sim'
         try:
-            WebDriverWait(driver, 5).until(
+            elm_sim = WebDriverWait(driver, 5).until(
                 EC.presence_of_element_located((By.ID, "AnuncioAppTaxista_exibir_anuncio_0"))
             )
-            # Dispara click + change + input para garantir que os handlers JS executem em headless
-            driver.execute_script("""
-                var el = document.getElementById('AnuncioAppTaxista_exibir_anuncio_0');
-                if (el) {
-                    el.checked = true;
-                    ['click','change','input'].forEach(function(evt) {
-                        el.dispatchEvent(new Event(evt, { bubbles: true }));
-                    });
-                }
-            """)
-            print("[INFO] Radio 'Sim' selecionado + eventos disparados.")
+            driver.execute_script("arguments[0].click();", elm_sim)
+            print("[INFO] Radio 'Sim' clicado.")
         except Exception as e:
             print(f"[WARNING] Não foi possível clicar em 'Sim': {e}")
 
         time.sleep(2)
 
-        # 2. Clicar em "Adicionar novo anúncio" se file input não estiver visível
-        # Usa is_displayed() para distinguir elementos no DOM mas ocultos (display:none)
-        file_input_visible = False
+        # 2. Clica em "Adicionar novo anúncio" se o file input não estiver no DOM ainda
         try:
-            elem = driver.find_element(By.ID, "upload-anuncio-tela_inicial_app_taxista-0")
-            file_input_visible = elem.is_displayed()
-            print(f"[INFO] File input no DOM, visível={file_input_visible}.")
+            driver.find_element(By.ID, UPLOAD_INPUT_ID)
         except Exception:
-            pass
-
-        if not file_input_visible:
             try:
-                add_btn = WebDriverWait(driver, 8).until(
-                    EC.element_to_be_clickable((By.ID, "adicionar-novo-anuncio-tela_inicial_app_taxista"))
+                add_btn = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.ID, ADD_BTN_ID))
                 )
                 driver.execute_script("arguments[0].click();", add_btn)
                 print("[INFO] Clicou em 'Adicionar novo anúncio'.")
-                time.sleep(3)
+                time.sleep(2)
             except Exception as e:
-                print(f"[ERROR] Botão 'Adicionar novo anúncio' não encontrado: {e}")
-                return {"sucesso": False, "mensagem": "Seção de upload não apareceu após clicar em 'Sim'."}
+                print(f"[ERROR] Botão 'Adicionar novo anúncio' falhou: {e}")
 
-        # 3. Adicionar imagem — garante que o input está visível antes do send_keys
+        # 3. Adicionar imagem
+        # Usa JS para garantir visibilidade antes do send_keys (evita stale + headless hidden input)
         try:
-            file_input = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "upload-anuncio-tela_inicial_app_taxista-0"))
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.ID, UPLOAD_INPUT_ID))
             )
-            # Força visibilidade para garantir que send_keys funcione em headless
-            driver.execute_script(
-                "arguments[0].style.display='block'; arguments[0].style.visibility='visible'; "
-                "arguments[0].style.opacity='1'; arguments[0].removeAttribute('hidden');",
-                file_input
-            )
+            # Re-encontra o elemento fresco e força visibilidade via JS
+            driver.execute_script("""
+                var el = document.getElementById(arguments[0]);
+                if (el) {
+                    el.style.display    = 'block';
+                    el.style.visibility = 'visible';
+                    el.style.opacity    = '1';
+                    el.removeAttribute('hidden');
+                }
+            """, UPLOAD_INPUT_ID)
+            # Re-encontra AGORA (evita stale reference após JS) e envia arquivo
+            file_input = driver.find_element(By.ID, UPLOAD_INPUT_ID)
             file_input.send_keys(imagem_path)
-            # Dispara evento change para acionar upload AJAX em headless
+            # Dispara change event para acionar upload AJAX em modo headless
             driver.execute_script(
-                "arguments[0].dispatchEvent(new Event('change', { bubbles: true }));",
-                file_input
+                "document.getElementById(arguments[0]).dispatchEvent(new Event('change', {bubbles:true}));",
+                UPLOAD_INPUT_ID
             )
-            print("[INFO] Arquivo enviado + evento change disparado. Aguardando upload AJAX...")
-            # Aguarda o campo de URL aparecer como confirmação de upload concluído
+            print("[INFO] Arquivo enviado + change event disparado. Aguardando upload AJAX...")
+            # Aguarda campo URL aparecer (confirma que AJAX de upload completou)
             try:
                 WebDriverWait(driver, 30).until(
-                    EC.visibility_of_element_located((By.ID, "AnuncioAppTaxista_0_url_anuncio"))
+                    EC.presence_of_element_located((By.ID, "AnuncioAppTaxista_0_url_anuncio"))
                 )
-                print("[INFO] Upload confirmado: campo de URL visível.")
+                print("[INFO] Upload AJAX confirmado: campo URL presente.")
             except Exception:
                 print("[WARNING] Campo URL não apareceu em 30s, aguardando 10s extras...")
                 time.sleep(10)
