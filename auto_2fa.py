@@ -977,8 +977,17 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
                 EC.presence_of_element_located((By.ID, "upload-anuncio-tela_inicial_app_taxista-0"))
             )
             file_input.send_keys(imagem_path)
-            print("[INFO] Imagem enviada com sucesso.")
-            time.sleep(3) # tempo para upload concluir
+            print("[INFO] Arquivo selecionado. Aguardando upload AJAX concluir...")
+            # Aguarda o campo de URL aparecer — ele só existe após o upload AJAX terminar
+            try:
+                WebDriverWait(driver, 30).until(
+                    EC.presence_of_element_located((By.ID, "AnuncioAppTaxista_0_url_anuncio"))
+                )
+                print("[INFO] Upload confirmado: campo de URL detectado.")
+            except Exception:
+                # Fallback: aguarda mais tempo e tenta mesmo assim
+                print("[WARNING] Campo URL não detectado após 30s, aguardando 10s extras...")
+                time.sleep(10)
         except Exception as e:
             print(f"[ERROR] Falha ao adicionar imagem: {e}")
             return {"sucesso": False, "mensagem": "Falha ao enviar imagem."}
@@ -986,7 +995,7 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
         # 4. Link para o anúncio
         if link_anuncio:
             try:
-                link_input = WebDriverWait(driver, 5).until(
+                link_input = WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.ID, "AnuncioAppTaxista_0_url_anuncio"))
                 )
                 # Remove o readonly/disabled se houver
