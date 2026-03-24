@@ -63,10 +63,22 @@ def gerar_codigo(chave_totp: str) -> str:
 
 
 def criar_driver(headless: bool = False) -> webdriver.Chrome:
-    """Cria e retorna uma instância do Chrome WebDriver."""
+    """Cria e retorna uma instância do Chrome WebDriver.
+    
+    Quando executado no Docker (DOCKER=true), usa display virtual Xvfb (:99)
+    em vez de headless puro — necessário para uploads AJAX funcionarem corretamente.
+    """
     opts = Options()
-    if headless:
+    em_docker = os.environ.get("DOCKER", "").lower() in ("1", "true", "yes")
+
+    if em_docker:
+        # No Docker: usa display virtual Xvfb (iniciado pelo entrypoint.sh)
+        # NÃO usa --headless para garantir que upload AJAX funcione
+        os.environ.setdefault("DISPLAY", ":99")
+        log.info("Docker detectado: usando display virtual DISPLAY=%s", os.environ.get("DISPLAY"))
+    elif headless:
         opts.add_argument("--headless=new")
+
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1280,900")
@@ -976,39 +988,44 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
                 print(f"[ERROR] Botão 'Adicionar novo anúncio' falhou: {e}")
 
         # 3. Adicionar imagem
-        # Usa JS para garantir visibilidade antes do send_keys (evita stale + headless hidden input)
         try:
             WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.ID, UPLOAD_INPUT_ID))
             )
-            # Re-encontra o elemento fresco e força visibilidade via JS
+            # Torna toda a cadeia de pais visível (alguns upload libs checam offsetParent)
             driver.execute_script("""
                 var el = document.getElementById(arguments[0]);
                 if (el) {
-                    el.style.display    = 'block';
-                    el.style.visibility = 'visible';
-                    el.style.opacity    = '1';
-                    el.removeAttribute('hidden');
+                    var node = el;
+                    while (node && node !== document.body) {
+                        if (getComputedStyle(node).display === 'none') {
+                            node.style.display = 'block';
+                        }
+                        node.style.visibility = 'visible';
+                        node.style.opacity    = '1';
+                        node.removeAttribute('hidden');
+                        node = node.parentElement;
+                    }
                 }
             """, UPLOAD_INPUT_ID)
-            # Re-encontra AGORA (evita stale reference após JS) e envia arquivo
+            time.sleep(0.5)
+            # Re-encontra fresco após JS e envia o arquivo (dispara change nativo isTrusted=true)
             file_input = driver.find_element(By.ID, UPLOAD_INPUT_ID)
             file_input.send_keys(imagem_path)
-            # Dispara change event para acionar upload AJAX em modo headless
-            driver.execute_script(
-                "document.getElementById(arguments[0]).dispatchEvent(new Event('change', {bubbles:true}));",
-                UPLOAD_INPUT_ID
-            )
-            print("[INFO] Arquivo enviado + change event disparado. Aguardando upload AJAX...")
-            # Aguarda campo URL aparecer (confirma que AJAX de upload completou)
+            print("[INFO] Arquivo enviado via send_keys. Aguardando upload AJAX (Remover aparecer)...")
+            # Confirmação real: botão "Remover" só aparece após upload de imagem com sucesso
             try:
                 WebDriverWait(driver, 30).until(
-                    EC.presence_of_element_located((By.ID, "AnuncioAppTaxista_0_url_anuncio"))
+                    EC.presence_of_element_located(
+                        (By.XPATH, '//a[normalize-space(text())="Remover" and contains(@href,"javascript")]'
+                                   '| //a[normalize-space(text())="Remover" and contains(@class,"remover")]'
+                                   '| //a[normalize-space(text())="Remover"]')
+                    )
                 )
-                print("[INFO] Upload AJAX confirmado: campo URL presente.")
+                print("[INFO] Upload AJAX confirmado: botão Remover detectado.")
             except Exception:
-                print("[WARNING] Campo URL não apareceu em 30s, aguardando 10s extras...")
-                time.sleep(10)
+                print("[WARNING] Botão Remover não apareceu em 30s, aguardando 8s extras...")
+                time.sleep(8)
         except Exception as e:
             print(f"[ERROR] Falha ao adicionar imagem: {e}")
             return {"sucesso": False, "mensagem": "Falha ao enviar imagem."}
