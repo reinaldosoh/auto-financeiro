@@ -225,9 +225,11 @@ async def anuncio_motorista(input_data: AnuncioMotoristaInput):
             raise HTTPException(status_code=400, detail={"sucesso": False, "mensagem": f"Erro ao decodificar imagem base64: {e}"})
     elif input_data.imagem_url:
         try:
-            req = urllib.request.Request(input_data.imagem_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response, open(tmp_imagem_path, 'wb') as out_file:
-                out_file.write(response.read())
+            import requests as req_lib
+            r = req_lib.get(input_data.imagem_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30, verify=False)
+            r.raise_for_status()
+            with open(tmp_imagem_path, "wb") as out_file:
+                out_file.write(r.content)
         except Exception as e:
             if os.path.exists(tmp_imagem_path):
                 os.remove(tmp_imagem_path)
