@@ -13,7 +13,7 @@ Endpoints:
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr
-from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, carregar_chaves, obter_chave, gerar_codigo
+from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, executar_remover_anuncio_motorista, carregar_chaves, obter_chave, gerar_codigo
 import logging
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -258,6 +258,40 @@ async def anuncio_motorista(input_data: AnuncioMotoristaInput):
     finally:
         if os.path.exists(tmp_imagem_path):
             os.remove(tmp_imagem_path)
+
+
+@app.post("/remover-anuncio", response_model=ResultadoOutput)
+async def remover_anuncio(creds: CredenciaisInput):
+    """
+    Faz login, navega para Recursos Premium e remove o anúncio ativo
+    na seção 'Adicionar anúncio na tela inicial do app motorista'.
+    """
+    log.info("Requisição (remover-anuncio) recebida para: %s", creds.email)
+
+    from functools import partial
+    loop = asyncio.get_event_loop()
+    func = partial(
+        executar_remover_anuncio_motorista,
+        email=creds.email,
+        senha=creds.senha,
+        headless=creds.headless,
+        manter_aberto=creds.manter_aberto,
+    )
+
+    try:
+        resultado = await loop.run_in_executor(executor, func)
+        if "chave_totp" not in resultado or resultado["chave_totp"] is None:
+            resultado["chave_totp"] = ""
+        if not resultado.get("sucesso", False):
+            raise HTTPException(status_code=400, detail=resultado)
+        return resultado
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Erro na thread /remover-anuncio: %s", e)
+        raise HTTPException(
+            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+        )
 
 
 @app.get("/health")

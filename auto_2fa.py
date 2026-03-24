@@ -1093,6 +1093,128 @@ def executar_adicionar_anuncio_motorista(email: str, senha: str, chave_secreta: 
              log.info("Navegador mantido aberto para %s.", email)
 
 
+def remover_anuncio_motorista(driver) -> dict:
+    """
+    Na tela de Recursos Premium, clica em 'Remover' no anúncio existente,
+    confirma o alert JavaScript e depois salva via 'btn-salvar-bandeira'.
+    Retorna dict com 'sucesso' e 'mensagem'.
+    """
+    print("[INFO] Iniciando remoção de anúncio na tela inicial do app motorista")
+    try:
+        # 1. Localizar e clicar no botão/link "Remover"
+        seletores_remover = [
+            (By.XPATH, '//a[normalize-space(text())="Remover" and contains(@class,"remover")]'),
+            (By.XPATH, '//a[normalize-space(text())="Remover"]'),
+            (By.XPATH, '//button[normalize-space(text())="Remover"]'),
+            (By.XPATH, '//*[contains(@id,"remover-anuncio")]'),
+            (By.XPATH, '//*[contains(@onclick,"remover") and contains(text(),"Remover")]'),
+            (By.XPATH, '//*[normalize-space(text())="Remover"]'),
+        ]
+
+        clicou = False
+        for by, sel in seletores_remover:
+            try:
+                btn = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((by, sel))
+                )
+                driver.execute_script("arguments[0].click();", btn)
+                print(f"[INFO] Clicou em 'Remover' via: {sel}")
+                clicou = True
+                break
+            except Exception:
+                continue
+
+        if not clicou:
+            return {"sucesso": False, "mensagem": "Botão 'Remover' não encontrado. Talvez não exista anúncio ativo."}
+
+        time.sleep(1)
+
+        # 2. Confirmar o alert JavaScript ("Tem certeza que deseja remover este anúncio?")
+        try:
+            alert = WebDriverWait(driver, 5).until(EC.alert_is_present())
+            print(f"[INFO] Alert detectado: {alert.text}")
+            alert.accept()
+            print("[INFO] Alert confirmado (OK).")
+        except Exception as e:
+            print(f"[WARNING] Nenhum alert detectado após clicar em Remover: {e}")
+
+        time.sleep(2)
+
+        # 3. Salvar via btn-salvar-bandeira
+        try:
+            btn_salvar = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.ID, "btn-salvar-bandeira"))
+            )
+            driver.execute_script("arguments[0].click();", btn_salvar)
+            print("[INFO] Botão salvar clicado.")
+            time.sleep(1)
+            try:
+                alert2 = driver.switch_to.alert
+                print(f"[INFO] Alert pós-salvar: {alert2.text}")
+                alert2.accept()
+            except Exception:
+                pass
+            time.sleep(3)
+        except Exception as e:
+            print(f"[WARNING] Falha ao clicar em salvar após remoção: {e}")
+
+        return {"sucesso": True, "mensagem": "Anúncio removido e salvo com sucesso!"}
+
+    except Exception as e:
+        log.exception("Erro inesperado ao remover anúncio motorista")
+        return {"sucesso": False, "mensagem": f"Erro inesperado: {e}"}
+
+
+def executar_remover_anuncio_motorista(email: str, senha: str, chave_secreta: str = None, headless: bool = False, manter_aberto: bool = False) -> dict:
+    """
+    Wrapper completo: login 2FA → Recursos Premium → remover anúncio motorista.
+    """
+    resultado = {"sucesso": False, "email": email, "chave_totp": chave_secreta or "", "mensagem": ""}
+    driver = None
+    try:
+        driver = criar_driver(headless)
+        if not fazer_login(driver, email, senha):
+            resultado["mensagem"] = "Falha no login inicial."
+            return resultado
+
+        time.sleep(3)
+        cenario = detectar_cenario_pos_login(driver)
+
+        if cenario in ("login_2fa", "setup_2fa"):
+            chave = chave_secreta or obter_chave(email)
+            if not chave:
+                resultado["mensagem"] = "Cenário 2FA detectado, mas chave secreta não está disponível."
+                return resultado
+            if not inserir_codigo_login_2fa(driver, chave):
+                resultado["mensagem"] = "Falha ao submeter código TOTP."
+                return resultado
+            time.sleep(5)
+
+        if not navegar_recursos_premium(driver):
+            resultado["mensagem"] = "Falha ao navegar até Recursos Premium."
+            return resultado
+
+        time.sleep(3)
+        ret = remover_anuncio_motorista(driver)
+        resultado["sucesso"] = ret["sucesso"]
+        resultado["mensagem"] = ret["mensagem"]
+        return resultado
+
+    except Exception as e:
+        log.exception("Erro inesperado na automação de remoção de anúncio")
+        resultado["mensagem"] = f"Erro inesperado: {str(e)}"
+        return resultado
+    finally:
+        if driver and not manter_aberto:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        elif driver and manter_aberto:
+            _drivers_abertos[email] = driver
+            log.info("Navegador mantido aberto para %s.", email)
+
+
 if __name__ == "__main__":
     import sys
 
