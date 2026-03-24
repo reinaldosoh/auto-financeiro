@@ -72,12 +72,19 @@ def criar_driver(headless: bool = False) -> webdriver.Chrome:
     em_docker = os.environ.get("DOCKER", "").lower() in ("1", "true", "yes")
 
     if em_docker:
-        # No Docker: usa display virtual Xvfb (iniciado pelo entrypoint.sh)
-        # NÃO usa --headless para garantir que upload AJAX funcione
-        os.environ.setdefault("DISPLAY", ":99")
-        log.info("Docker detectado: usando display virtual DISPLAY=%s", os.environ.get("DISPLAY"))
+        # No Docker: usa display virtual Xvfb iniciado pelo entrypoint.sh
+        display = os.environ.get("DISPLAY", ":99")
+        log.info("Docker detectado: usando DISPLAY=%s (modo não-headless)", display)
+        opts.add_argument(f"--display={display}")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--no-default-browser-check")
+        opts.add_argument("--disable-popup-blocking")
+        opts.add_argument("--disable-infobars")
+        opts.add_argument("--disable-extensions")
     elif headless:
         opts.add_argument("--headless=new")
+        opts.add_argument("--disable-gpu")
 
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
