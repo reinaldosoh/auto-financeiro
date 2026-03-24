@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.env
+.DS_Store
+.git/
+.github/
+pagina.html
+output*.log
+cascade_input*.txt

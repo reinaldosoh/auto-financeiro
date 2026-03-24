@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.DS_Store
+*.log
+pagina.html
+output*.log
+cascade_input*.txt
+cascade_input - cópia.txt
+chaves_totp.json

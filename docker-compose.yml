@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  auto-financeiro:
+    build: .
+    container_name: auto-financeiro-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - DOCKER=true
+    shm_size: "2gb"

@@ -1,0 +1,7 @@
+pyotp==2.9.0
+pyperclip==1.9.0
+selenium>=4.15.0
+webdriver-manager>=4.0.1
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
