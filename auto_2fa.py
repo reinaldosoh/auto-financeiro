@@ -8,6 +8,7 @@ import logging
 import json
 import os
 import re
+import base64
 import pyotp
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -962,140 +963,145 @@ def executar_login(email: str, senha: str, headless: bool = False, manter_aberto
             log.info("Navegador mantido aberto para %s. Feche manualmente quando terminar.", email)
 
 def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecionar_todas=True):
-    print("[INFO] Configurando anúncio na tela inicial do app motorista")
-    
+    log.info("Configurando anúncio na tela inicial do app motorista")
+    TIPO       = "tela_inicial_app_taxista"
+    NOME_MOD   = "AnuncioAppTaxista"
+    FIELD_ID   = f"anuncio-{TIPO}"
+    INDICE     = 0
+    SELECT_ID  = f"filtro_bandeiras_anuncio_{TIPO}_{INDICE}"
+
     try:
-        UPLOAD_INPUT_ID = "upload-anuncio-tela_inicial_app_taxista-0"
-        ADD_BTN_ID      = "adicionar-novo-anuncio-tela_inicial_app_taxista"
+        # 1. Marcar radio Sim e acionar alteraVisibilidadeCamposAnuncios
+        #    Isso mostra o form e cria automaticamente o anúncio vazio (totalNaoExcluidos==0)
+        driver.execute_script("""
+            var sim = document.getElementById(arguments[0]);
+            var nao = document.getElementById(arguments[1]);
+            if (sim) sim.checked = true;
+            if (nao) nao.checked = false;
+        """, f"{NOME_MOD}_exibir_anuncio_0", f"{NOME_MOD}_exibir_anuncio_1")
+        driver.execute_script(f"alteraVisibilidadeCamposAnuncios('{TIPO}');")
+        log.info("alteraVisibilidadeCamposAnuncios chamada.")
 
-        # 1. Selecionar 'Sim'
-        try:
-            elm_sim = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.ID, "AnuncioAppTaxista_exibir_anuncio_0"))
+        # 2. Aguarda form criar o botão add-foto (sinal de que exibirAnuncio rodou)
+        WebDriverWait(driver, 10).until(
+            lambda d: d.execute_script(
+                f"return !!document.getElementById('add-foto-{FIELD_ID}-{INDICE}');"
             )
-            driver.execute_script("arguments[0].click();", elm_sim)
-            print("[INFO] Radio 'Sim' clicado.")
-        except Exception as e:
-            print(f"[WARNING] Não foi possível clicar em 'Sim': {e}")
+        )
+        log.info("Formulário de anúncio criado com sucesso.")
 
-        time.sleep(2)
+        # 3. Upload da imagem via XHR do browser (evita CSRF e contorna AjaxUpload)
+        with open(imagem_path, "rb") as fh:
+            img_b64 = base64.b64encode(fh.read()).decode("utf-8")
 
-        # 2. Clica em "Adicionar novo anúncio" se o file input não estiver no DOM ainda
-        try:
-            driver.find_element(By.ID, UPLOAD_INPUT_ID)
-        except Exception:
-            try:
-                add_btn = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.ID, ADD_BTN_ID))
-                )
-                driver.execute_script("arguments[0].click();", add_btn)
-                print("[INFO] Clicou em 'Adicionar novo anúncio'.")
-                time.sleep(2)
-            except Exception as e:
-                print(f"[ERROR] Botão 'Adicionar novo anúncio' falhou: {e}")
+        bandeira_id = driver.execute_script(
+            "return typeof bandeiraId !== 'undefined' ? bandeiraId : null;"
+        )
+        log.info(f"Fazendo upload via browser XHR (bandeiraId={bandeira_id})...")
 
-        # 3. Adicionar imagem
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, UPLOAD_INPUT_ID))
-            )
-            # Torna toda a cadeia de pais visível (alguns upload libs checam offsetParent)
+        driver.set_script_timeout(30)
+        upload_result = driver.execute_async_script("""
+            var callback = arguments[arguments.length - 1];
+            var b64 = arguments[0];
+            var bId = arguments[1];
+            var byteStr = atob(b64);
+            var ab = new ArrayBuffer(byteStr.length);
+            var ia = new Uint8Array(ab);
+            for (var i = 0; i < byteStr.length; i++) ia[i] = byteStr.charCodeAt(i);
+            var blob = new Blob([ab], {type: 'image/jpeg'});
+            var file = new File([blob], 'banner.jpeg', {type: 'image/jpeg'});
+            var fd = new FormData();
+            fd.append('foto', file);
+            fd.append('id', String(bId));
+            fd.append('tipo', 'anuncio');
+            fd.append('campo', 'anuncio');
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', (typeof baseUrl !== 'undefined' ? baseUrl : '') + '/bandeira/salvarImagemConfiguracao');
+            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+            xhr.onload = function() {
+                try {
+                    var r = JSON.parse(xhr.responseText.trim());
+                    callback({success: r.success === true, urlS3: r.urlS3 || null,
+                              fotoName: r.fotoName || 'banner.jpeg',
+                              error: r.errors ? r.errors[0] : null});
+                } catch(e) {
+                    callback({success: false, error: 'parse: ' + xhr.responseText.substring(0,120)});
+                }
+            };
+            xhr.onerror = function() { callback({success: false, error: 'network error'}); };
+            xhr.send(fd);
+        """, img_b64, bandeira_id)
+
+        if not upload_result or not upload_result.get("success"):
+            err = (upload_result or {}).get("error", "timeout/desconhecido")
+            return {"sucesso": False, "mensagem": f"Falha no upload da imagem: {err}"}
+
+        url_s3    = upload_result["urlS3"]
+        foto_name = upload_result.get("fotoName", "banner.jpeg")
+        log.info(f"Upload OK: {url_s3}")
+
+        # 4. Simula onComplete do AjaxUpload: atualiza preview + campo URL
+        driver.execute_script("""
+            var fId = arguments[0], idx = arguments[1], nm = arguments[2],
+                url = arguments[3], fn = arguments[4];
+            var img = document.getElementById('preview-img-' + fId + '-' + idx);
+            if (img) img.src = url;
+            var lbl = document.getElementById('preview-label-' + fId + '-' + idx);
+            if (lbl) lbl.textContent = fn;
+            var wrap = document.querySelector('.wrapper-preview-label-' + fId + '-' + idx);
+            if (wrap) wrap.style.display = 'flex';
+            var prev = document.getElementById('preview-' + fId + '-' + idx);
+            if (prev) prev.style.display = 'flex';
+            var addFoto = document.getElementById('add-foto-' + fId + '-' + idx);
+            if (addFoto) addFoto.style.display = 'none';
+            var urlField = document.getElementById(nm + '_' + idx + '_url_imagem');
+            if (urlField) urlField.value = url;
+        """, FIELD_ID, INDICE, NOME_MOD, url_s3, foto_name)
+        log.info("Preview e campo URL_imagem atualizados.")
+
+        # 5. Link do anúncio
+        if link_anuncio:
             driver.execute_script("""
                 var el = document.getElementById(arguments[0]);
                 if (el) {
-                    var node = el;
-                    while (node && node !== document.body) {
-                        if (getComputedStyle(node).display === 'none') {
-                            node.style.display = 'block';
-                        }
-                        node.style.visibility = 'visible';
-                        node.style.opacity    = '1';
-                        node.removeAttribute('hidden');
-                        node = node.parentElement;
+                    el.removeAttribute('disabled');
+                    el.removeAttribute('readonly');
+                    el.value = arguments[1];
+                }
+            """, f"{NOME_MOD}_{INDICE}_url_anuncio", link_anuncio)
+            log.info("Link do anúncio inserido.")
+
+        # 6. Selecionar todas as centrais via multiselect
+        if selecionar_todas:
+            driver.execute_script("""
+                var sel = document.getElementById(arguments[0]);
+                if (sel) {
+                    for (var i = 0; i < sel.options.length; i++) sel.options[i].selected = true;
+                    if (window.jQuery) {
+                        jQuery(sel).multiselect('refresh');
+                        jQuery(sel).trigger('change');
                     }
                 }
-            """, UPLOAD_INPUT_ID)
-            time.sleep(0.5)
-            # Re-encontra fresco após JS e envia o arquivo (dispara change nativo isTrusted=true)
-            file_input = driver.find_element(By.ID, UPLOAD_INPUT_ID)
-            file_input.send_keys(imagem_path)
-            print("[INFO] Arquivo enviado via send_keys. Aguardando upload AJAX (Remover aparecer)...")
-            # Confirmação real: botão "Remover" só aparece após upload de imagem com sucesso
-            try:
-                WebDriverWait(driver, 30).until(
-                    EC.presence_of_element_located(
-                        (By.XPATH, '//a[normalize-space(text())="Remover" and contains(@href,"javascript")]'
-                                   '| //a[normalize-space(text())="Remover" and contains(@class,"remover")]'
-                                   '| //a[normalize-space(text())="Remover"]')
-                    )
-                )
-                print("[INFO] Upload AJAX confirmado: botão Remover detectado.")
-            except Exception:
-                print("[WARNING] Botão Remover não apareceu em 30s, aguardando 8s extras...")
-                time.sleep(8)
-        except Exception as e:
-            print(f"[ERROR] Falha ao adicionar imagem: {e}")
-            return {"sucesso": False, "mensagem": "Falha ao enviar imagem."}
-        
-        # 4. Link para o anúncio
-        if link_anuncio:
-            try:
-                link_input = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "AnuncioAppTaxista_0_url_anuncio"))
-                )
-                # Remove o readonly/disabled se houver
-                driver.execute_script("arguments[0].removeAttribute('disabled');", link_input)
-                driver.execute_script("arguments[0].removeAttribute('readonly');", link_input)
-                link_input.clear()
-                link_input.send_keys(link_anuncio)
-                print("[INFO] Link inserido com sucesso.")
-            except Exception as e:
-                print(f"[ERROR] Falha ao inserir link: {e}")
-            
-        # 5. Selecionar todas as centrais
-        if selecionar_todas:
-            try:
-                select_id = "filtro_bandeiras_anuncio_tela_inicial_app_taxista_0"
-                driver.execute_script(f"""
-                    var select = document.getElementById('{select_id}');
-                    if(select) {{
-                        var wrapper = select.nextElementSibling;
-                        if(wrapper) {{
-                            var allCheck = wrapper.querySelector('input[value="multiselect-all"]');
-                            if(allCheck && !allCheck.checked) {{
-                                allCheck.click();
-                            }}
-                        }}
-                    }}
-                """)
-                print("[INFO] Selecionar todas (centrais) clicado com sucesso.")
-            except Exception as e:
-                print(f"[ERROR] Falha ao selecionar todas as centrais: {e}")
-                
-        # 6. Gravar / Salvar
-        try:
-            print("[INFO] Clicando no botão Gravar...")
-            btn_salvar = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.ID, "btn-salvar-bandeira"))
-            )
-            driver.execute_script("arguments[0].click();", btn_salvar)
-            print("[INFO] Botão salvar clicado com sucesso.")
-            time.sleep(1) # Aguardar possivel alert
-            try:
-                alert = driver.switch_to.alert
-                print(f"[INFO] Alert detectado: {alert.text}")
-                alert.accept()
-                print("[INFO] Alert aceito.")
-            except Exception:
-                pass
-            time.sleep(3) # Aguardar salvar após alert
-        except Exception as e:
-            print(f"[ERROR] Falha ao clicar em salvar: {e}")
-            return {"sucesso": False, "mensagem": "Falha ao clicar em salvar."}
+            """, SELECT_ID)
+            log.info("Todas as centrais selecionadas.")
 
-        # 7. Finalização
-        return {"sucesso": True, "mensagem": "Anúncio configurado e salvo com sucesso!"}
-    
+        # 7. Salvar
+        log.info("Clicando no botão Salvar...")
+        btn_salvar = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.ID, "btn-salvar-bandeira"))
+        )
+        driver.execute_script("arguments[0].click();", btn_salvar)
+        time.sleep(1)
+        try:
+            alert = driver.switch_to.alert
+            log.info(f"Alert detectado: {alert.text}")
+            alert.accept()
+        except Exception:
+            pass
+        time.sleep(3)
+
+        return {"sucesso": True, "mensagem": f"Anúncio configurado com sucesso! URL: {url_s3}"}
+
     except Exception as e:
         log.exception("Erro inesperado ao adicionar anúncio motorista")
         return {"sucesso": False, "mensagem": f"Falha ao configurar anúncio: {e}"}
