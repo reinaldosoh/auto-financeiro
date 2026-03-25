@@ -964,15 +964,13 @@ def executar_login(email: str, senha: str, headless: bool = False, manter_aberto
 
 def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecionar_todas=True):
     log.info("Configurando anúncio na tela inicial do app motorista")
-    TIPO       = "tela_inicial_app_taxista"
-    NOME_MOD   = "AnuncioAppTaxista"
-    FIELD_ID   = f"anuncio-{TIPO}"
-    INDICE     = 0
-    SELECT_ID  = f"filtro_bandeiras_anuncio_{TIPO}_{INDICE}"
+    TIPO      = "tela_inicial_app_taxista"
+    NOME_MOD  = "AnuncioAppTaxista"
+    FIELD_ID  = f"anuncio-{TIPO}"
+    NOVO_IDX  = 1   # Índice do NOVO anúncio (0 = existente, que será marcado excluido)
 
     try:
         # 1. Marcar radio Sim e acionar alteraVisibilidadeCamposAnuncios
-        #    Isso mostra o form e cria automaticamente o anúncio vazio (totalNaoExcluidos==0)
         driver.execute_script("""
             var sim = document.getElementById(arguments[0]);
             var nao = document.getElementById(arguments[1]);
@@ -982,15 +980,38 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
         driver.execute_script(f"alteraVisibilidadeCamposAnuncios('{TIPO}');")
         log.info("alteraVisibilidadeCamposAnuncios chamada.")
 
-        # 2. Aguarda form criar o botão add-foto (sinal de que exibirAnuncio rodou)
+        # 2. Aguarda form do anúncio existente (índice 0)
         WebDriverWait(driver, 10).until(
             lambda d: d.execute_script(
-                f"return !!document.getElementById('add-foto-{FIELD_ID}-{INDICE}');"
+                f"return !!document.getElementById('add-foto-{FIELD_ID}-0');"
             )
         )
-        log.info("Formulário de anúncio criado com sucesso.")
+        log.info("Anúncio existente (idx=0) visível.")
 
-        # 3. Upload da imagem via XHR do browser (evita CSRF e contorna AjaxUpload)
+        # 3. Marca anúncio existente (idx=0) como excluido=1
+        #    O servidor não consegue alterar url_imagem/url_anuncio do existente
+        #    (permite_alterar_imagem=false, permite_alterar_url_anuncio=false).
+        #    Solução: excluir o existente e criar um novo com flags habilitados.
+        driver.execute_script("""
+            var elExc = document.getElementById(arguments[0]);
+            if (elExc) {
+                elExc.value = '1';
+                if (window.jQuery) jQuery(elExc).val('1');
+            }
+        """, f"{NOME_MOD}_0_excluido")
+        log.info("Anúncio existente marcado como excluido=1.")
+
+        # 4. Adiciona novo anúncio (índice 1) via JS — campos enabled por padrão
+        driver.execute_script(f"adicionarNovoAnuncio('{TIPO}');")
+        time.sleep(0.5)
+        WebDriverWait(driver, 10).until(
+            lambda d: d.execute_script(
+                f"return !!document.getElementById('add-foto-{FIELD_ID}-{NOVO_IDX}');"
+            )
+        )
+        log.info(f"Novo anúncio (idx={NOVO_IDX}) criado com campos habilitados.")
+
+        # 5. Upload da imagem via XHR do browser
         with open(imagem_path, "rb") as fh:
             img_b64 = base64.b64encode(fh.read()).decode("utf-8")
 
@@ -1040,7 +1061,7 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
         foto_name = upload_result.get("fotoName", "banner.jpeg")
         log.info(f"Upload OK: {url_s3}")
 
-        # 4. Simula onComplete do AjaxUpload: atualiza preview + campo URL
+        # 6. Atualiza preview + campo url_imagem do NOVO anúncio (idx=1)
         driver.execute_script("""
             var fId = arguments[0], idx = arguments[1], nm = arguments[2],
                 url = arguments[3], fn = arguments[4];
@@ -1056,22 +1077,28 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
             if (addFoto) addFoto.style.display = 'none';
             var urlField = document.getElementById(nm + '_' + idx + '_url_imagem');
             if (urlField) urlField.value = url;
-        """, FIELD_ID, INDICE, NOME_MOD, url_s3, foto_name)
-        log.info("Preview e campo URL_imagem atualizados.")
+        """, FIELD_ID, NOVO_IDX, NOME_MOD, url_s3, foto_name)
+        log.info("Preview e campo url_imagem do novo anúncio atualizados.")
 
-        # 5. Link do anúncio
+        # 7. Link do novo anúncio — campo enabled por padrão no novo registro
         if link_anuncio:
             driver.execute_script("""
                 var el = document.getElementById(arguments[0]);
                 if (el) {
+                    el.disabled = false;
                     el.removeAttribute('disabled');
-                    el.removeAttribute('readonly');
                     el.value = arguments[1];
+                    if (window.jQuery) jQuery(el).prop('disabled', false).val(arguments[1]);
                 }
-            """, f"{NOME_MOD}_{INDICE}_url_anuncio", link_anuncio)
-            log.info("Link do anúncio inserido.")
+                var lista = typeof obterListaAnuncio === 'function' ? obterListaAnuncio(arguments[2]) : null;
+                if (lista && lista[arguments[3]] !== undefined) {
+                    lista[arguments[3]].url_anuncio = arguments[1];
+                }
+            """, f"{NOME_MOD}_{NOVO_IDX}_url_anuncio", link_anuncio, TIPO, NOVO_IDX)
+            log.info(f"Link do anúncio definido no novo registro (idx={NOVO_IDX}).")
 
-        # 6. Selecionar todas as centrais via multiselect
+        # 8. Seleciona todas as centrais para o NOVO anúncio
+        SELECT_ID_NOVO = f"filtro_bandeiras_anuncio_{TIPO}_{NOVO_IDX}"
         if selecionar_todas:
             driver.execute_script("""
                 var sel = document.getElementById(arguments[0]);
@@ -1082,10 +1109,23 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
                         jQuery(sel).trigger('change');
                     }
                 }
-            """, SELECT_ID)
-            log.info("Todas as centrais selecionadas.")
+            """, SELECT_ID_NOVO)
+            log.info("Todas as centrais selecionadas para o novo anúncio.")
 
-        # 7. Salvar
+        # 9. Diagnóstico: lê FormData antes de salvar (apenas campos AnuncioAppTaxista)
+        pre_save = driver.execute_script("""
+            var form = document.getElementById('bandeira-form');
+            var fd = form ? new FormData(form) : null;
+            if (!fd) return null;
+            var r = {};
+            fd.forEach(function(v, k) {
+                if (k.indexOf('AnuncioAppTaxista') !== -1) r[k] = v;
+            });
+            return r;
+        """)
+        log.info(f"FormData AnuncioAppTaxista antes do save: {pre_save}")
+
+        # 10. Salvar
         log.info("Clicando no botão Salvar...")
         btn_salvar = WebDriverWait(driver, 5).until(
             EC.presence_of_element_located((By.ID, "btn-salvar-bandeira"))
@@ -1098,9 +1138,31 @@ def adicionar_anuncio_motorista(driver, imagem_path, link_anuncio=None, selecion
             alert.accept()
         except Exception:
             pass
-        time.sleep(3)
+        time.sleep(5)
 
-        return {"sucesso": True, "mensagem": f"Anúncio configurado com sucesso! URL: {url_s3}"}
+        # 11. Verificação pós-save: navega de volta e lê valores salvos
+        log.info(f"URL após save: {driver.current_url}")
+        try:
+            driver.get("https://cloud.taximachine.com.br/bandeira/update")
+            time.sleep(3)
+            aba = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, '//a[normalize-space(text())="Recursos premium"]'))
+            )
+            driver.execute_script("arguments[0].click();", aba)
+            time.sleep(2)
+            saved = driver.execute_script("""
+                var lista = typeof obterListaAnuncio === 'function' ? obterListaAnuncio(arguments[0]) : null;
+                if (!lista || lista.length === 0) return null;
+                var ativos = lista.filter(function(a) { return String(a.excluido) !== '1'; });
+                return ativos.length > 0 ? {url_anuncio: ativos[0].url_anuncio, url_imagem: ativos[0].url_imagem} : null;
+            """, TIPO)
+            log.info(f"Valores salvos (verificação): {saved}")
+            url_imagem_salva = saved.get("url_imagem") if saved else None
+        except Exception as e_ver:
+            log.warning(f"Verificação pós-save falhou: {e_ver}")
+            url_imagem_salva = url_s3
+
+        return {"sucesso": True, "mensagem": f"Anúncio configurado com sucesso! URL: {url_imagem_salva or url_s3}"}
 
     except Exception as e:
         log.exception("Erro inesperado ao adicionar anúncio motorista")
