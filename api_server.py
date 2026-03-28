@@ -1,19 +1,33 @@
 """
-API FastAPI para disparar a automação de 2FA via HTTP POST.
+API FastAPI para disparar a automação de 2FA e anúncios no TaxiMachine.
 
-Uso:
+Uso local:
     uvicorn api_server:app --host 0.0.0.0 --port 8000 --reload
 
+Chamada externa (substitua BASE_URL pela URL pública do serviço, ex. Easypanel):
+    POST {BASE_URL}/anuncio-passageiro
+    Content-Type: application/json
+    Corpo JSON (campos principais):
+      email, senha, chave_secreta (TOTP, se a conta pedir 2FA no login),
+      imagem_url OU imagem_base64,
+      link_anuncio (obrigatório para passageiro),
+      selecionar_todas (default true), headless (default true), manter_aberto (default false)
+    Timeout recomendado no cliente: 300–600 s.
+
 Endpoints:
-    POST /autenticar  - Setup 2FA inicial (ou login se já configurado)
-    POST /login       - Login com 2FA já configurado (usa chave salva)
-    GET  /chaves      - Lista emails com chave TOTP salva
-    POST /codigo      - Gera código TOTP para um email
+    POST /autenticar       - Setup 2FA inicial (ou login se já configurado)
+    POST /login            - Login com 2FA (chave salva no servidor)
+    GET  /chaves           - Lista emails com chave TOTP salva no disco do servidor
+    POST /codigo           - Gera código TOTP para um email
+    POST /anuncio-motorista
+    POST /remover-anuncio
+    POST /anuncio-passageiro
+    POST /remover-anuncio-passageiro
 """
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr
-from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, executar_remover_anuncio_motorista, carregar_chaves, obter_chave, gerar_codigo
+from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, executar_remover_anuncio_motorista, executar_adicionar_anuncio_passageiro, executar_remover_anuncio_passageiro, carregar_chaves, obter_chave, gerar_codigo
 import logging
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +36,7 @@ import uuid
 import tempfile
 import os
 import urllib.request
+from typing import Any, Dict, Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,6 +85,7 @@ class ResultadoOutput(BaseModel):
     email: str
     chave_totp: str
     mensagem: str
+    verificacao: Optional[Dict[str, Any]] = None
 
 
 @app.post("/autenticar", response_model=ResultadoOutput)
@@ -304,6 +320,113 @@ async def remover_anuncio(creds: RemoverAnuncioInput):
             status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
         )
 
+
+@app.post("/anuncio-passageiro", response_model=ResultadoOutput)
+async def anuncio_passageiro(input_data: AnuncioMotoristaInput):
+    """
+    Recebe credenciais e infomações do anúncio (imagem, link, checkbox).
+    Faz login, navega para Recursos Premium e preenche o anúncio na seção de passageiros.
+    """
+    log.info("Requisição (anuncio-passageiro) recebida para: %s", input_data.email)
+
+    if not input_data.imagem_url and not input_data.imagem_base64:
+        raise HTTPException(status_code=400, detail={"sucesso": False, "mensagem": "Você deve informar 'imagem_url' ou 'imagem_base64'."})
+
+    if not (input_data.link_anuncio or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail={"sucesso": False, "mensagem": "O campo 'link_anuncio' é obrigatório para anúncio de passageiro (validação ao salvar no painel)."},
+        )
+
+    tmp_imagem_path = os.path.join(tempfile.gettempdir(), f"anuncio_pass_{uuid.uuid4().hex}.png")
+
+    if input_data.imagem_base64:
+        try:
+            base64_data = input_data.imagem_base64
+            if "," in base64_data:
+                base64_data = base64_data.split(",")[1]
+            with open(tmp_imagem_path, "wb") as f:
+                f.write(base64.b64decode(base64_data))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail={"sucesso": False, "mensagem": f"Erro ao decodificar imagem base64: {e}"})
+    elif input_data.imagem_url:
+        try:
+            import requests as req_lib
+            r = req_lib.get(input_data.imagem_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30, verify=False)
+            r.raise_for_status()
+            with open(tmp_imagem_path, "wb") as out_file:
+                out_file.write(r.content)
+        except Exception as e:
+            if os.path.exists(tmp_imagem_path):
+                os.remove(tmp_imagem_path)
+            raise HTTPException(status_code=400, detail={"sucesso": False, "mensagem": f"Erro ao baixar imagem da URL: {e}"})
+
+    from functools import partial
+    loop = asyncio.get_event_loop()
+    
+    func = partial(
+        executar_adicionar_anuncio_passageiro,
+        email=input_data.email,
+        senha=input_data.senha,
+        chave_secreta=input_data.chave_secreta,
+        headless=input_data.headless,
+        manter_aberto=input_data.manter_aberto,
+        imagem_path=tmp_imagem_path,
+        link_anuncio=input_data.link_anuncio,
+        selecionar_todas=input_data.selecionar_todas
+    )
+
+    try:
+        resultado = await loop.run_in_executor(executor, func)
+        if not resultado.get("sucesso", False):
+             raise HTTPException(status_code=400, detail=resultado)
+        if "chave_totp" not in resultado or resultado["chave_totp"] is None:
+             resultado["chave_totp"] = ""
+        return resultado
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Erro na thread /anuncio-passageiro: %s", e)
+        raise HTTPException(
+            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+        )
+    finally:
+        if os.path.exists(tmp_imagem_path):
+            os.remove(tmp_imagem_path)
+
+
+@app.post("/remover-anuncio-passageiro", response_model=ResultadoOutput)
+async def remover_anuncio_passageiro_endpoint(creds: RemoverAnuncioInput):
+    """
+    Faz login, navega para Recursos Premium e remove todos os anúncios de passageiro ativos.
+    """
+    log.info("Requisição (remover-anuncio-passageiro) recebida para: %s", creds.email)
+
+    from functools import partial
+    loop = asyncio.get_event_loop()
+    func = partial(
+        executar_remover_anuncio_passageiro,
+        email=creds.email,
+        senha=creds.senha,
+        chave_secreta=creds.chave_secreta,
+        headless=creds.headless,
+        manter_aberto=creds.manter_aberto,
+    )
+
+    try:
+        resultado = await loop.run_in_executor(executor, func)
+        if "chave_totp" not in resultado or resultado["chave_totp"] is None:
+            resultado["chave_totp"] = ""
+        if not resultado.get("sucesso", False):
+            raise HTTPException(status_code=400, detail=resultado)
+        return resultado
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Erro na thread /remover-anuncio-passageiro: %s", e)
+        raise HTTPException(
+            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+        )
 
 @app.get("/health")
 async def health():

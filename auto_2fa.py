@@ -1337,6 +1337,635 @@ def executar_remover_anuncio_motorista(email: str, senha: str, chave_secreta: st
             log.info("Navegador mantido aberto para %s.", email)
 
 
+def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecionar_todas=True):
+    """
+    Adiciona anúncio na seção "Adicionar anúncio na tela inicial do app passageiro".
+
+    Fluxo alinhado à UI: Sim → slot vazio (índice 0 se novo) ou, se já houver anúncio ativo
+    com imagem/link, clica em "+ Adicionar novo anúncio" (id adicionar-novo-anuncio-...).
+    A imagem é enviada como no fluxo manual (XHR); o link vai no campo "Link para o anúncio".
+    """
+    log.info("Configurando anúncio na tela inicial do app passageiro")
+    TIPO      = "tela_inicial_app_passageiro"
+    NOME_MOD  = "AnuncioAppPassageiro"
+    FIELD_ID  = f"anuncio-{TIPO}"
+    ADD_BTN_ID = f"adicionar-novo-anuncio-{TIPO}"
+
+    try:
+        # Rolar até a seção (abaixo do motorista); sem isso multiselect/campos podem falhar em headless.
+        driver.execute_script("""
+            var el = document.getElementById('label-exibir-anuncio-tela_inicial_app_passageiro');
+            if (el) el.scrollIntoView({block: 'center', behavior: 'instant'});
+        """)
+        time.sleep(0.5)
+
+        # 1. "Sim" em Adicionar anúncio… + exibir campos (label + input para disparar handlers)
+        try:
+            lbl_sim = driver.find_element(
+                By.CSS_SELECTOR, f'label[for="{NOME_MOD}_exibir_anuncio_0"]'
+            )
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", lbl_sim)
+            time.sleep(0.15)
+            driver.execute_script("arguments[0].click();", lbl_sim)
+            log.info("Clicou no label do radio Sim (passageiro).")
+        except Exception:
+            try:
+                sim_el = WebDriverWait(driver, 8).until(
+                    EC.presence_of_element_located((By.ID, f"{NOME_MOD}_exibir_anuncio_0"))
+                )
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sim_el)
+                driver.execute_script("arguments[0].click();", sim_el)
+                log.info("Clicou no radio Sim (passageiro).")
+            except Exception:
+                pass
+        driver.execute_script("""
+            var sim = document.getElementById(arguments[0]);
+            var nao = document.getElementById(arguments[1]);
+            if (sim) sim.checked = true;
+            if (nao) nao.checked = false;
+        """, f"{NOME_MOD}_exibir_anuncio_0", f"{NOME_MOD}_exibir_anuncio_1")
+        driver.execute_script(f"alteraVisibilidadeCamposAnuncios('{TIPO}');")
+        log.info("alteraVisibilidadeCamposAnuncios chamada.")
+
+        WebDriverWait(driver, 15).until(
+            lambda d: d.execute_script(f"return !!document.getElementById('add-foto-{FIELD_ID}-0');")
+        )
+
+        # 2. Índice do slot vazio: primeiro sem url_imagem (e não excluído); senão "+ Adicionar novo anúncio"
+        NOVO_IDX = None
+        for _ in range(18):
+            info = driver.execute_script(
+                """
+                var FIELD_ID = arguments[0], NOME_MOD = arguments[1], TIPO = arguments[2];
+                var lista = typeof obterListaAnuncio === 'function' ? obterListaAnuncio(TIPO) : null;
+                var i = 0;
+                while (document.getElementById('add-foto-' + FIELD_ID + '-' + i)) i++;
+                var maxIdx = i - 1;
+                if (maxIdx < 0) return {ok: false};
+                for (var j = 0; j <= maxIdx; j++) {
+                    var elImg = document.getElementById(NOME_MOD + '_' + j + '_url_imagem');
+                    var elExc = document.getElementById(NOME_MOD + '_' + j + '_excluido');
+                    var vDom = elImg && elImg.value ? String(elImg.value).trim() : '';
+                    var excl = elExc && String(elExc.value) === '1';
+                    var row = lista && lista[j];
+                    var vList = row && row.url_imagem ? String(row.url_imagem).trim() : '';
+                    var uList = row && row.url_anuncio ? String(row.url_anuncio).trim() : '';
+                    var ocupado = !excl && (vDom.length > 0 || vList.length > 0 || uList.length > 0);
+                    if (!ocupado) return {ok: true, idx: j, needAdd: false};
+                }
+                return {ok: true, idx: maxIdx + 1, needAdd: true};
+                """,
+                FIELD_ID,
+                NOME_MOD,
+                TIPO,
+            )
+            if not info or not info.get("ok"):
+                time.sleep(0.35)
+                continue
+            if info.get("needAdd"):
+                try:
+                    btn = WebDriverWait(driver, 6).until(
+                        EC.element_to_be_clickable((By.ID, ADD_BTN_ID))
+                    )
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                    time.sleep(0.15)
+                    driver.execute_script("arguments[0].click();", btn)
+                    log.info("Clicou em '+ Adicionar novo anúncio' (%s).", ADD_BTN_ID)
+                except Exception as e_btn:
+                    log.warning("Clique no botão adicionar falhou (%s); usando adicionarNovoAnuncio().", e_btn)
+                    driver.execute_script(f"adicionarNovoAnuncio('{TIPO}');")
+                time.sleep(0.75)
+                continue
+            NOVO_IDX = int(info["idx"])
+            break
+
+        if NOVO_IDX is None:
+            return {
+                "sucesso": False,
+                "mensagem": "Não foi possível obter um slot vazio para o anúncio (passageiro).",
+            }
+        log.info("Usando slot anúncio passageiro idx=%s", NOVO_IDX)
+
+        _add_foto_el = f"add-foto-{FIELD_ID}-{NOVO_IDX}"
+        WebDriverWait(driver, 10).until(
+            lambda d, eid=_add_foto_el: d.execute_script(
+                "return !!document.getElementById(arguments[0]);",
+                eid,
+            )
+        )
+
+        # Reativar slot se estiver apenas marcado como excluído (reuso sem novo índice)
+        driver.execute_script(
+            """
+            var elExc = document.getElementById(arguments[0]);
+            if (elExc && String(elExc.value) === '1') {
+                elExc.value = '0';
+                if (window.jQuery) jQuery(elExc).val('0');
+            }
+            """,
+            f"{NOME_MOD}_{NOVO_IDX}_excluido",
+        )
+
+        # Garantir que o input de link do índice existe (linha nova pode demorar após "+ Adicionar anúncio")
+        try:
+            WebDriverWait(driver, 25).until(
+                lambda d, idx=NOVO_IDX, nm=NOME_MOD, fid=FIELD_ID: d.execute_script(
+                    """
+                    var idx = arguments[0], nm = arguments[1], fid = arguments[2];
+                    if (document.getElementById(nm + '_' + idx + '_url_anuncio')) return true;
+                    var w = document.getElementById(fid + '-' + idx);
+                    if (w) {
+                        var inp = w.querySelector('input[id*="url_anuncio"], input[name*="url_anuncio"]');
+                        if (inp) return true;
+                    }
+                    return false;
+                    """,
+                    idx,
+                    nm,
+                    fid,
+                )
+            )
+        except TimeoutException:
+            return {
+                "sucesso": False,
+                "mensagem": (
+                    f"O campo de link do anúncio (índice {NOVO_IDX}) não apareceu no DOM a tempo. "
+                    "Aguarde a página carregar ou adicione o anúncio manualmente uma vez."
+                ),
+            }
+
+        # 3. Upload da imagem via XHR do browser (equivalente a anexar após upload no S3)
+        with open(imagem_path, "rb") as fh:
+            img_b64 = base64.b64encode(fh.read()).decode("utf-8")
+
+        bandeira_id = driver.execute_script(
+            "return typeof bandeiraId !== 'undefined' ? bandeiraId : null;"
+        )
+        log.info(f"Fazendo upload via browser XHR (bandeiraId={bandeira_id})...")
+
+        driver.set_script_timeout(30)
+        upload_result = driver.execute_async_script("""
+            var callback = arguments[arguments.length - 1];
+            var b64 = arguments[0];
+            var bId = arguments[1];
+            var byteStr = atob(b64);
+            var ab = new ArrayBuffer(byteStr.length);
+            var ia = new Uint8Array(ab);
+            for (var i = 0; i < byteStr.length; i++) ia[i] = byteStr.charCodeAt(i);
+            var blob = new Blob([ab], {type: 'image/jpeg'});
+            var file = new File([blob], 'banner.jpeg', {type: 'image/jpeg'});
+            var fd = new FormData();
+            fd.append('foto', file);
+            fd.append('id', String(bId));
+            fd.append('tipo', 'anuncio');
+            fd.append('campo', 'anuncio');
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', (typeof baseUrl !== 'undefined' ? baseUrl : '') + '/bandeira/salvarImagemConfiguracao');
+            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+            xhr.onload = function() {
+                try {
+                    var r = JSON.parse(xhr.responseText.trim());
+                    callback({success: r.success === true, urlS3: r.urlS3 || null,
+                              fotoName: r.fotoName || 'banner.jpeg',
+                              error: r.errors ? r.errors[0] : null});
+                } catch(e) {
+                    callback({success: false, error: 'parse: ' + xhr.responseText.substring(0,120)});
+                }
+            };
+            xhr.onerror = function() { callback({success: false, error: 'network error'}); };
+            xhr.send(fd);
+        """, img_b64, bandeira_id)
+
+        if not upload_result or not upload_result.get("success"):
+            err = (upload_result or {}).get("error", "timeout/desconhecido")
+            return {"sucesso": False, "mensagem": f"Falha no upload da imagem: {err}"}
+
+        url_s3    = upload_result["urlS3"]
+        foto_name = upload_result.get("fotoName", "banner.jpeg")
+        log.info(f"Upload OK: {url_s3}")
+
+        link_limpo = (link_anuncio or "").strip()
+        if not link_limpo:
+            return {
+                "sucesso": False,
+                "mensagem": "link_anuncio é obrigatório: o painel valida o link ao salvar.",
+            }
+
+        # 6–7. Preview, url_imagem, url_anuncio (mesma ordem do debug_intercept) + eventos nativos no link
+        ok_campos = driver.execute_script(
+            """
+            function nativeInputValue(el, val) {
+                if (!el) return;
+                try {
+                    var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                    if (desc && desc.set) desc.set.call(el, val);
+                    else el.value = val;
+                } catch (e) { el.value = val; }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+            }
+            var fId = arguments[0], idx = arguments[1], nm = arguments[2],
+                urlImg = arguments[3], fn = arguments[4], link = arguments[5], TIPO = arguments[6];
+            var idImg = nm + '_' + idx + '_url_imagem';
+            var idUrl = nm + '_' + idx + '_url_anuncio';
+            var row = document.getElementById(fId + '-' + idx);
+            var img = document.getElementById('preview-img-' + fId + '-' + idx);
+            if (img) img.src = urlImg;
+            var lbl = document.getElementById('preview-label-' + fId + '-' + idx);
+            if (lbl) lbl.textContent = fn;
+            var wrap = document.querySelector('.wrapper-preview-label-' + fId + '-' + idx);
+            if (wrap) wrap.style.display = 'flex';
+            var prev = document.getElementById('preview-' + fId + '-' + idx);
+            if (prev) prev.style.display = 'flex';
+            var addFoto = document.getElementById('add-foto-' + fId + '-' + idx);
+            if (addFoto) addFoto.style.display = 'none';
+            var elImg = document.getElementById(idImg);
+            var elUrl = document.getElementById(idUrl);
+            if (!elImg && row) elImg = row.querySelector('input[id*="_url_imagem"], input[name*="_url_imagem"], input[name*="url_imagem"]');
+            if (!elUrl && row) elUrl = row.querySelector('input[id*="url_anuncio"], input[name*="url_anuncio"]');
+            if (elImg) {
+                elImg.value = urlImg;
+                if (window.jQuery) jQuery(elImg).val(urlImg).trigger('change');
+            }
+            if (elUrl) {
+                elUrl.removeAttribute('disabled');
+                elUrl.removeAttribute('readonly');
+                elUrl.disabled = false;
+                elUrl.readOnly = false;
+                elUrl.value = link;
+                if (window.jQuery) {
+                    jQuery(elUrl).prop('disabled', false).prop('readonly', false).val(link)
+                        .trigger('input').trigger('change').trigger('blur');
+                }
+                nativeInputValue(elUrl, link);
+            }
+            if (typeof copiarDadosAnuncios === 'function') copiarDadosAnuncios(TIPO);
+            var lista = typeof obterListaAnuncio === 'function' ? obterListaAnuncio(TIPO) : null;
+            if (lista && lista[idx] !== undefined) {
+                lista[idx].url_imagem = urlImg;
+                lista[idx].url_anuncio = link;
+            }
+            return {
+                tem_url_imagem: !!elImg,
+                tem_url_anuncio: !!elUrl,
+                valor_link: elUrl ? String(elUrl.value || '') : '',
+                valor_img: elImg ? String(elImg.value || '') : ''
+            };
+            """,
+            FIELD_ID,
+            NOVO_IDX,
+            NOME_MOD,
+            url_s3,
+            foto_name,
+            link_limpo,
+            TIPO,
+        )
+        log.info(
+            "Campos anúncio passageiro idx=%s: tem_link_el=%s link_len=%s",
+            NOVO_IDX,
+            (ok_campos or {}).get("tem_url_anuncio"),
+            len((ok_campos or {}).get("valor_link") or ""),
+        )
+        if not ok_campos or not ok_campos.get("tem_url_anuncio"):
+            return {
+                "sucesso": False,
+                "mensagem": f"Campo de link não encontrado no DOM (id {NOME_MOD}_{NOVO_IDX}_url_anuncio).",
+            }
+        if not (ok_campos.get("valor_link") or "").strip():
+            try:
+                try:
+                    inp = driver.find_element(By.ID, f"{NOME_MOD}_{NOVO_IDX}_url_anuncio")
+                except NoSuchElementException:
+                    inp = driver.find_element(
+                        By.CSS_SELECTOR,
+                        f"#{FIELD_ID}-{NOVO_IDX} input[id*='url_anuncio'], #{FIELD_ID}-{NOVO_IDX} input[name*='url_anuncio']",
+                    )
+                driver.execute_script(
+                    "arguments[0].removeAttribute('readonly'); arguments[0].removeAttribute('disabled');"
+                    "arguments[0].disabled=false;arguments[0].readOnly=false;",
+                    inp,
+                )
+                inp.clear()
+                inp.send_keys(link_limpo)
+                log.info("Link preenchido via send_keys (fallback).")
+            except Exception as e_sk:
+                log.warning("Fallback send_keys no link falhou: %s", e_sk)
+                return {
+                    "sucesso": False,
+                    "mensagem": "Não foi possível preencher o link do anúncio (campo continua vazio).",
+                }
+
+        # 8. Seleciona todas as centrais (select + multiselect + checkbox "Selecionar todas")
+        SELECT_ID_NOVO = f"filtro_bandeiras_anuncio_{TIPO}_{NOVO_IDX}"
+        if selecionar_todas:
+            driver.execute_script("""
+                var sel = document.getElementById(arguments[0]);
+                if (!sel) return;
+                for (var i = 0; i < sel.options.length; i++) sel.options[i].selected = true;
+                if (window.jQuery) {
+                    var $s = jQuery(sel);
+                    try {
+                        if ($s.data('multiselect')) {
+                            $s.multiselect('selectAll', false);
+                        }
+                    } catch (e1) {}
+                    try {
+                        $s.multiselect('refresh');
+                        $s.trigger('change');
+                    } catch (e2) {}
+                    var wrapper = sel.nextElementSibling;
+                    if (wrapper) {
+                        var allCheck = wrapper.querySelector('input[value="multiselect-all"]');
+                        if (allCheck && !allCheck.checked) allCheck.click();
+                    }
+                }
+            """, SELECT_ID_NOVO)
+            log.info("Todas as centrais selecionadas para o novo anúncio.")
+
+        # 8b. Reaplica link/imagem no DOM e na lista (multiselect/change do painel pode zerar)
+        driver.execute_script(
+            """
+            var nm = arguments[0], idx = arguments[1], link = arguments[2], img = arguments[3], TIPO = arguments[4], fid = arguments[5];
+            var row = document.getElementById(fid + '-' + idx);
+            var elU = document.getElementById(nm + '_' + idx + '_url_anuncio');
+            var elI = document.getElementById(nm + '_' + idx + '_url_imagem');
+            if (!elU && row) elU = row.querySelector('input[id*="url_anuncio"], input[name*="url_anuncio"]');
+            if (!elI && row) elI = row.querySelector('input[id*="_url_imagem"], input[name*="url_imagem"]');
+            if (elU) {
+                elU.removeAttribute('disabled'); elU.removeAttribute('readonly');
+                elU.disabled = false; elU.readOnly = false;
+                elU.value = link;
+                if (window.jQuery) jQuery(elU).val(link).trigger('input').trigger('change');
+            }
+            if (elI && img) {
+                elI.value = img;
+                if (window.jQuery) jQuery(elI).val(img).trigger('change');
+            }
+            var lista = typeof obterListaAnuncio === 'function' ? obterListaAnuncio(TIPO) : null;
+            if (lista && lista[idx]) {
+                lista[idx].url_anuncio = link;
+                lista[idx].url_imagem = img;
+            }
+            """,
+            NOME_MOD,
+            NOVO_IDX,
+            link_limpo,
+            url_s3,
+            TIPO,
+            FIELD_ID,
+        )
+
+        # 9. Salvar
+        log.info("Clicando no botão Salvar...")
+        btn_salvar = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.ID, "btn-salvar-bandeira"))
+        )
+        driver.execute_script("arguments[0].click();", btn_salvar)
+        time.sleep(1)
+        try:
+            alert = driver.switch_to.alert
+            log.info(f"Alert detectado: {alert.text}")
+            alert.accept()
+        except Exception:
+            pass
+        time.sleep(5)
+
+        log.info("Anúncio passageiro salvo; verificando persistência na lista…")
+        verificacao = {"lista_ativos": None, "validado": False}
+        try:
+            driver.get("https://cloud.taximachine.com.br/bandeira/update")
+            time.sleep(3)
+            aba = WebDriverWait(driver, 8).until(
+                EC.presence_of_element_located((By.XPATH, '//a[normalize-space(text())="Recursos premium"]'))
+            )
+            driver.execute_script("arguments[0].click();", aba)
+            time.sleep(2)
+            ativos = driver.execute_script(
+                """
+                var TIPO = arguments[0];
+                var lista = typeof obterListaAnuncio === 'function' ? obterListaAnuncio(TIPO) : null;
+                if (!lista) return [];
+                return lista
+                    .filter(function(a) { return String(a.excluido) !== '1'; })
+                    .map(function(a) {
+                        return {url_imagem: a.url_imagem || '', url_anuncio: a.url_anuncio || ''};
+                    });
+                """,
+                TIPO,
+            )
+            verificacao["lista_ativos"] = ativos
+            dom_slot = driver.execute_script(
+                """
+                var nm = arguments[0], idx = arguments[1];
+                var i = document.getElementById(nm + '_' + idx + '_url_imagem');
+                var u = document.getElementById(nm + '_' + idx + '_url_anuncio');
+                return {url_imagem: i ? String(i.value || '').trim() : '', url_anuncio: u ? String(u.value || '').trim() : ''};
+                """,
+                NOME_MOD,
+                NOVO_IDX,
+            )
+            verificacao["dom_slot_idx"] = NOVO_IDX
+            verificacao["dom_slot"] = dom_slot
+
+            def _norm_url(s):
+                s = (s or "").strip().rstrip("/")
+                return s.lower()
+
+            nome_arquivo = (url_s3 or "").rstrip("/").split("/")[-1]
+            link_esperado = _norm_url(link_anuncio)
+            want_link = bool((link_anuncio or "").strip())
+
+            def _confere(uimg, ulnk):
+                uimg = (uimg or "").strip()
+                ulnk = (ulnk or "").strip()
+                img_ok = bool(uimg) and (
+                    url_s3 in uimg
+                    or uimg == url_s3
+                    or (nome_arquivo and nome_arquivo in uimg)
+                )
+                link_ok = not want_link or _norm_url(ulnk) == link_esperado or link_esperado in _norm_url(ulnk)
+                return img_ok and link_ok
+
+            if dom_slot and _confere(dom_slot.get("url_imagem"), dom_slot.get("url_anuncio")):
+                verificacao["validado"] = True
+                verificacao["anuncio_conferido"] = dict(dom_slot)
+            else:
+                for ad in ativos or []:
+                    if _confere(ad.get("url_imagem"), ad.get("url_anuncio")):
+                        verificacao["validado"] = True
+                        verificacao["anuncio_conferido"] = {
+                            "url_imagem": ad.get("url_imagem"),
+                            "url_anuncio": ad.get("url_anuncio"),
+                        }
+                        break
+            log.info(
+                "Verificação pós-save passageiro: validado=%s, qtd_ativos=%s",
+                verificacao["validado"],
+                len(ativos or []),
+            )
+        except Exception as e_ver:
+            log.warning("Verificação pós-save passageiro falhou: %s", e_ver)
+            verificacao["erro_verificacao"] = str(e_ver)
+
+        if verificacao.get("validado"):
+            msg = "Anúncio de passageiro criado e validado (imagem + link na lista após recarregar)."
+        else:
+            msg = "Anúncio de passageiro salvo; validação automática não confirmou imagem/link — confira no painel."
+        return {"sucesso": True, "mensagem": msg, "verificacao": verificacao}
+
+    except Exception as e:
+        log.exception("Erro ao adicionar anúncio passageiro")
+        return {"sucesso": False, "mensagem": f"Erro: {str(e)}"}
+
+
+def executar_adicionar_anuncio_passageiro(email: str, senha: str, chave_secreta: str = None, headless: bool = False, imagem_path: str = "", link_anuncio: str = "", selecionar_todas: bool = True, manter_aberto: bool = True) -> dict:
+    """
+    Wrapper completo: login 2FA → Recursos Premium → adicionar anúncio passageiro.
+    """
+    resultado = {"sucesso": False, "email": email, "chave_totp": chave_secreta or "", "mensagem": ""}
+    driver = None
+    try:
+        driver = criar_driver(headless)
+        if not fazer_login(driver, email, senha):
+            resultado["mensagem"] = "Falha no login inicial."
+            return resultado
+
+        time.sleep(3)
+        cenario = detectar_cenario_pos_login(driver)
+
+        if cenario in ("login_2fa", "setup_2fa"):
+            chave = chave_secreta or obter_chave(email)
+            if not chave:
+                resultado["mensagem"] = "Cenário 2FA detectado, mas chave secreta não está disponível."
+                return resultado
+            if not inserir_codigo_login_2fa(driver, chave):
+                resultado["mensagem"] = "Falha ao submeter código TOTP."
+                return resultado
+            resultado["chave_totp"] = chave
+            time.sleep(5)
+
+        if not navegar_recursos_premium(driver):
+            resultado["mensagem"] = "Falha ao navegar até Recursos Premium."
+            return resultado
+
+        time.sleep(3)
+        
+        ret = adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio, selecionar_todas)
+        resultado["sucesso"] = ret["sucesso"]
+        resultado["mensagem"] = ret["mensagem"]
+        if "verificacao" in ret:
+            resultado["verificacao"] = ret["verificacao"]
+        return resultado
+
+    except Exception as e:
+        log.exception("Erro inesperado na automação de anúncio passageiro")
+        resultado["mensagem"] = f"Erro inesperado: {str(e)}"
+        return resultado
+    finally:
+        if driver and not manter_aberto:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        elif driver and manter_aberto:
+            _drivers_abertos[email] = driver
+            log.info("Navegador mantido aberto para %s.", email)
+
+
+def remover_anuncio_passageiro(driver) -> dict:
+    """
+    Remove todos os anúncios de passageiro clicando em todos os botões Remover específicos.
+    """
+    TIPO = "tela_inicial_app_passageiro"
+    removidos = 0
+    
+    while True:
+        try:
+            # Encontra o primeiro botão de remover visível do passageiro
+            btn = driver.find_element(By.XPATH, f'//*[@onclick[contains(., "removerAnuncio") and contains(., "{TIPO}")]]')
+            driver.execute_script("arguments[0].click();", btn)
+            time.sleep(1)
+            try:
+                driver.switch_to.alert.accept()
+            except:
+                pass
+            time.sleep(2)
+            removidos += 1
+        except NoSuchElementException:
+            break
+
+    if removidos == 0:
+        return {"sucesso": False, "mensagem": "Nenhum anúncio de passageiro encontrado para remover."}
+
+    # Salvar via btn-salvar-bandeira
+    try:
+        btn_salvar = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.ID, "btn-salvar-bandeira"))
+        )
+        driver.execute_script("arguments[0].click();", btn_salvar)
+        time.sleep(1)
+        try:
+            alert2 = driver.switch_to.alert
+            alert2.accept()
+        except Exception:
+            pass
+        time.sleep(3)
+        return {"sucesso": True, "mensagem": f"{removidos} anúncio(s) de passageiro removido(s) com sucesso!"}
+    except Exception as e:
+        return {"sucesso": False, "mensagem": f"Falha ao salvar após remover: {e}"}
+
+
+def executar_remover_anuncio_passageiro(email: str, senha: str, chave_secreta: str = None, headless: bool = False, manter_aberto: bool = False) -> dict:
+    """
+    Wrapper completo: login 2FA → Recursos Premium → remover anúncios de passageiro.
+    """
+    resultado = {"sucesso": False, "email": email, "chave_totp": chave_secreta or "", "mensagem": ""}
+    driver = None
+    try:
+        driver = criar_driver(headless)
+        if not fazer_login(driver, email, senha):
+            resultado["mensagem"] = "Falha no login inicial."
+            return resultado
+
+        time.sleep(3)
+        cenario = detectar_cenario_pos_login(driver)
+
+        if cenario in ("login_2fa", "setup_2fa"):
+            chave = chave_secreta or obter_chave(email)
+            if not chave:
+                resultado["mensagem"] = "Cenário 2FA detectado, mas chave secreta não está disponível."
+                return resultado
+            if not inserir_codigo_login_2fa(driver, chave):
+                resultado["mensagem"] = "Falha ao submeter código TOTP."
+                return resultado
+            time.sleep(5)
+
+        if not navegar_recursos_premium(driver):
+            resultado["mensagem"] = "Falha ao navegar até Recursos Premium."
+            return resultado
+
+        time.sleep(3)
+        ret = remover_anuncio_passageiro(driver)
+        resultado["sucesso"] = ret["sucesso"]
+        resultado["mensagem"] = ret["mensagem"]
+        return resultado
+
+    except Exception as e:
+        log.exception("Erro inesperado na remoção de anúncio passageiro")
+        resultado["mensagem"] = f"Erro inesperado: {str(e)}"
+        return resultado
+    finally:
+        if driver and not manter_aberto:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        elif driver and manter_aberto:
+            _drivers_abertos[email] = driver
+            log.info("Navegador mantido aberto para %s.", email)
+
+
 if __name__ == "__main__":
     import sys
 

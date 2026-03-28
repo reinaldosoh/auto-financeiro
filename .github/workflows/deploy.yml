@@ -1,8 +1,11 @@
+# Ao dar push na branch main (ou disparar manualmente), faz build e push da imagem para o
+# GitHub Container Registry (ghcr.io). No Easypanel (ou outro host), aponte a tag da imagem
+# publicada, por exemplo: ghcr.io/USUARIO/AUTO_FINANCEIRO:latest
 name: Build e Push Docker Image
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 env:
