@@ -428,6 +428,12 @@ async def remover_anuncio_passageiro_endpoint(creds: RemoverAnuncioInput):
             status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
         )
 
+@app.get("/")
+async def root():
+    """Evita 404 no path raiz (testes rápidos no painel / N8N)."""
+    return {"ok": True, "service": "taximachine-automacao", "health": "/health", "docs": "/docs"}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
