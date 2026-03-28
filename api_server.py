@@ -22,7 +22,7 @@ Endpoints:
     POST /anuncio-motorista
     POST /remover-anuncio
     POST /anuncio-passageiro
-    POST /remover-anuncio-passageiro
+    POST /remover-anuncio-passageiro  (JSON opcional: indice inteiro 0-based; omitir = remover todos)
 """
 
 from fastapi import FastAPI, HTTPException
@@ -66,6 +66,8 @@ class RemoverAnuncioInput(BaseModel):
     chave_secreta: str = None
     headless: bool = True
     manter_aberto: bool = False
+    # Só para /remover-anuncio-passageiro: 0 = primeiro anúncio, 1 = segundo, … Omita para remover todos.
+    indice: Optional[int] = None
 
 
 class AnuncioMotoristaInput(BaseModel):
@@ -398,9 +400,14 @@ async def anuncio_passageiro(input_data: AnuncioMotoristaInput):
 @app.post("/remover-anuncio-passageiro", response_model=ResultadoOutput)
 async def remover_anuncio_passageiro_endpoint(creds: RemoverAnuncioInput):
     """
-    Faz login, navega para Recursos Premium e remove todos os anúncios de passageiro ativos.
+    Remove anúncios de passageiro na tela inicial do app.
+    Envie `indice` (0-based) para remover só uma campanha; omita `indice` para remover todas.
     """
-    log.info("Requisição (remover-anuncio-passageiro) recebida para: %s", creds.email)
+    log.info(
+        "Requisição (remover-anuncio-passageiro) para: %s indice=%s",
+        creds.email,
+        creds.indice,
+    )
 
     from functools import partial
     loop = asyncio.get_event_loop()
@@ -411,6 +418,7 @@ async def remover_anuncio_passageiro_endpoint(creds: RemoverAnuncioInput):
         chave_secreta=creds.chave_secreta,
         headless=creds.headless,
         manter_aberto=creds.manter_aberto,
+        indice=creds.indice,
     )
 
     try:

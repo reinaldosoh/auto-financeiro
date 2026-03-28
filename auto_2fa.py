@@ -1873,22 +1873,124 @@ def executar_adicionar_anuncio_passageiro(email: str, senha: str, chave_secreta:
             log.info("Navegador mantido aberto para %s.", email)
 
 
-def remover_anuncio_passageiro(driver) -> dict:
+def _preparar_secao_anuncio_passageiro(driver) -> None:
+    """Rola até a seção e garante radio Sim + campos visíveis."""
+    TIPO = "tela_inicial_app_passageiro"
+    NOME_MOD = "AnuncioAppPassageiro"
+    driver.execute_script("""
+        var el = document.getElementById('label-exibir-anuncio-tela_inicial_app_passageiro');
+        if (el) el.scrollIntoView({block: 'center', behavior: 'instant'});
+    """)
+    time.sleep(0.35)
+    driver.execute_script(
+        """
+        var sim = document.getElementById(arguments[0]);
+        var nao = document.getElementById(arguments[1]);
+        if (sim) sim.checked = true;
+        if (nao) nao.checked = false;
+    """,
+        f"{NOME_MOD}_exibir_anuncio_0",
+        f"{NOME_MOD}_exibir_anuncio_1",
+    )
+    driver.execute_script(f"if (typeof alteraVisibilidadeCamposAnuncios === 'function') alteraVisibilidadeCamposAnuncios('{TIPO}');")
+    time.sleep(0.45)
+
+
+def _salvar_alteracoes_bandeira(driver) -> dict:
+    """Clica em Salvar e confirma o alert padrão do painel."""
+    try:
+        btn_salvar = WebDriverWait(driver, 8).until(
+            EC.presence_of_element_located((By.ID, "btn-salvar-bandeira"))
+        )
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn_salvar)
+        time.sleep(0.15)
+        driver.execute_script("arguments[0].click();", btn_salvar)
+        time.sleep(1)
+        try:
+            driver.switch_to.alert.accept()
+        except Exception:
+            pass
+        time.sleep(3)
+        return {"ok": True, "erro": None}
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
+
+
+def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
     """
-    Remove todos os anúncios de passageiro clicando em todos os botões Remover específicos.
+    Remove anúncio(s) de passageiro (tela inicial do app passageiro).
+
+    :param indice: Índice 0-based do anúncio (0 = primeiro na lista do painel). Se None, remove todos.
     """
     TIPO = "tela_inicial_app_passageiro"
+    _preparar_secao_anuncio_passageiro(driver)
+
+    if indice is not None:
+        try:
+            indice = int(indice)
+        except (TypeError, ValueError):
+            return {"sucesso": False, "mensagem": "Parâmetro indice deve ser um inteiro >= 0."}
+        if indice < 0:
+            return {"sucesso": False, "mensagem": "Parâmetro indice deve ser um inteiro >= 0."}
+        clicou = driver.execute_script(
+            """
+            var TIPO = arguments[0], wantIdx = parseInt(arguments[1], 10);
+            var nodes = document.querySelectorAll('a[onclick*="removerAnuncio"], button[onclick*="removerAnuncio"], [onclick*="removerAnuncio"]');
+            for (var i = 0; i < nodes.length; i++) {
+                var oc = nodes[i].getAttribute('onclick') || '';
+                if (oc.indexOf(TIPO) === -1 || oc.indexOf('removerAnuncio') === -1) continue;
+                var m = oc.match(/removerAnuncio\\s*\\(\\s*['\"]([^'\"]+)['\"]\\s*,\\s*(\\d+)\\s*\\)/);
+                if (m && m[1] === TIPO && parseInt(m[2], 10) === wantIdx) {
+                    nodes[i].scrollIntoView({block: 'center', behavior: 'instant'});
+                    nodes[i].click();
+                    return true;
+                }
+            }
+            if (typeof removerAnuncio === 'function') {
+                try {
+                    removerAnuncio(TIPO, wantIdx);
+                    return true;
+                } catch (e) {}
+            }
+            return false;
+            """,
+            TIPO,
+            indice,
+        )
+        if not clicou:
+            return {
+                "sucesso": False,
+                "mensagem": (
+                    f"Não foi encontrado o controle Remover para o anúncio de passageiro no índice {indice}. "
+                    "Confira se o índice existe (0 = primeiro anúncio)."
+                ),
+            }
+        time.sleep(0.8)
+        try:
+            driver.switch_to.alert.accept()
+        except Exception:
+            pass
+        time.sleep(1.2)
+        salvo = _salvar_alteracoes_bandeira(driver)
+        if not salvo["ok"]:
+            return {"sucesso": False, "mensagem": f"Remoção acionada, mas falha ao salvar: {salvo['erro']}"}
+        return {
+            "sucesso": True,
+            "mensagem": f"Anúncio de passageiro no índice {indice} removido e alterações salvas.",
+        }
+
     removidos = 0
-    
     while True:
         try:
-            # Encontra o primeiro botão de remover visível do passageiro
-            btn = driver.find_element(By.XPATH, f'//*[@onclick[contains(., "removerAnuncio") and contains(., "{TIPO}")]]')
+            btn = driver.find_element(
+                By.XPATH,
+                f'//*[@onclick[contains(., "removerAnuncio") and contains(., "{TIPO}")]]',
+            )
             driver.execute_script("arguments[0].click();", btn)
             time.sleep(1)
             try:
                 driver.switch_to.alert.accept()
-            except:
+            except Exception:
                 pass
             time.sleep(2)
             removidos += 1
@@ -1898,27 +2000,27 @@ def remover_anuncio_passageiro(driver) -> dict:
     if removidos == 0:
         return {"sucesso": False, "mensagem": "Nenhum anúncio de passageiro encontrado para remover."}
 
-    # Salvar via btn-salvar-bandeira
-    try:
-        btn_salvar = WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.ID, "btn-salvar-bandeira"))
-        )
-        driver.execute_script("arguments[0].click();", btn_salvar)
-        time.sleep(1)
-        try:
-            alert2 = driver.switch_to.alert
-            alert2.accept()
-        except Exception:
-            pass
-        time.sleep(3)
-        return {"sucesso": True, "mensagem": f"{removidos} anúncio(s) de passageiro removido(s) com sucesso!"}
-    except Exception as e:
-        return {"sucesso": False, "mensagem": f"Falha ao salvar após remover: {e}"}
+    salvo = _salvar_alteracoes_bandeira(driver)
+    if not salvo["ok"]:
+        return {"sucesso": False, "mensagem": f"Falha ao salvar após remover: {salvo['erro']}"}
+    return {
+        "sucesso": True,
+        "mensagem": f"{removidos} anúncio(s) de passageiro removido(s) com sucesso!",
+    }
 
 
-def executar_remover_anuncio_passageiro(email: str, senha: str, chave_secreta: str = None, headless: bool = False, manter_aberto: bool = False) -> dict:
+def executar_remover_anuncio_passageiro(
+    email: str,
+    senha: str,
+    chave_secreta: str = None,
+    headless: bool = False,
+    manter_aberto: bool = False,
+    indice: int = None,
+) -> dict:
     """
-    Wrapper completo: login 2FA → Recursos Premium → remover anúncios de passageiro.
+    Wrapper completo: login 2FA → Recursos Premium → remover anúncio(s) de passageiro.
+
+    :param indice: Se informado, remove só esse anúncio (0-based). Se None, remove todos.
     """
     resultado = {"sucesso": False, "email": email, "chave_totp": chave_secreta or "", "mensagem": ""}
     driver = None
@@ -1946,7 +2048,7 @@ def executar_remover_anuncio_passageiro(email: str, senha: str, chave_secreta: s
             return resultado
 
         time.sleep(3)
-        ret = remover_anuncio_passageiro(driver)
+        ret = remover_anuncio_passageiro(driver, indice=indice)
         resultado["sucesso"] = ret["sucesso"]
         resultado["mensagem"] = ret["mensagem"]
         return resultado

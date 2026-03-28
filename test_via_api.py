@@ -72,8 +72,11 @@ def cadastrar_banner_passageiro(imagem_url: str, link_anuncio: str):
     return resp
 
 
-def remover_banner_passageiro():
-    """POST /remover-anuncio-passageiro — remove anúncios de passageiro (fluxo atual: todos)."""
+def remover_banner_passageiro(indice: int = None):
+    """
+    POST /remover-anuncio-passageiro.
+    indice=None → remove todos; indice=0 → só o primeiro anúncio; indice=1 → segundo, etc.
+    """
     payload = {
         "email": EMAIL,
         "senha": SENHA,
@@ -81,7 +84,9 @@ def remover_banner_passageiro():
         "headless": True,
         "manter_aberto": False,
     }
-    print(f"\n[REMOVER PASSAGEIRO] POST {BASE_URL}/remover-anuncio-passageiro")
+    if indice is not None:
+        payload["indice"] = int(indice)
+    print(f"\n[REMOVER PASSAGEIRO] POST {BASE_URL}/remover-anuncio-passageiro payload={payload}")
     resp = requests.post(f"{BASE_URL}/remover-anuncio-passageiro", json=payload, timeout=300)
     print("Status:", resp.status_code)
     print("Resposta:", json.dumps(resp.json(), indent=2, ensure_ascii=False))
@@ -106,10 +111,18 @@ if __name__ == "__main__":
         link = sys.argv[3] if len(sys.argv) > 3 else "https://meli.la/1uCEWgL"
         cadastrar_banner_passageiro(url_img, link)
     elif acao == "remover-passageiro":
-        remover_banner_passageiro()
+        idx = None
+        if len(sys.argv) > 2:
+            try:
+                idx = int(sys.argv[2])
+            except ValueError:
+                print("Erro: indice deve ser um número inteiro (0 = primeiro anúncio).", flush=True)
+                sys.exit(1)
+        remover_banner_passageiro(idx)
     else:
         print(
             "Uso: python3 test_via_api.py "
             "[cadastrar <imagem_path> <link>] | [remover] | "
-            "[passageiro [imagem_url] [link]] | [remover-passageiro]"
+            "[passageiro [imagem_url] [link]] | "
+            "[remover-passageiro [indice_ou_vazio_para_todos]]"
         )
