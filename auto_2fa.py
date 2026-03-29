@@ -1368,22 +1368,68 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
     NOME_MOD  = "AnuncioAppPassageiro"
     FIELD_ID  = f"anuncio-{TIPO}"
     ADD_BTN_ID = f"adicionar-novo-anuncio-{TIPO}"
+    em_docker = os.environ.get("DOCKER", "").lower() in ("1", "true", "yes")
 
     try:
-        # Rolar até a seção (abaixo do motorista); sem isso multiselect/campos podem falhar em headless.
-        driver.execute_script("""
-            var el = document.getElementById('label-exibir-anuncio-tela_inicial_app_passageiro');
-            if (el) el.scrollIntoView({block: 'center', behavior: 'instant'});
-        """)
-        time.sleep(0.5)
+        # Passageiro fica abaixo do motorista na mesma aba. No Docker/Xvfb o bloco pode não
+        # renderizar add-foto até estar no viewport — o fluxo do motorista não sofre tanto
+        # porque vem primeiro. Scroll agressivo + mesmo bootstrap JS do motorista.
 
-        # 1. "Sim" em Adicionar anúncio… + exibir campos (label + input para disparar handlers)
+        def _scroll_passageiro_visivel():
+            driver.execute_script(
+                """
+                var ids = [
+                    'label-exibir-anuncio-tela_inicial_app_passageiro',
+                    'lista-anuncios-tela_inicial_app_passageiro',
+                    'adicionar-novo-anuncio-tela_inicial_app_passageiro'
+                ];
+                for (var i = 0; i < ids.length; i++) {
+                    var e = document.getElementById(ids[i]);
+                    if (e) e.scrollIntoView({block: 'center', behavior: 'instant'});
+                }
+                var row0 = document.getElementById('anuncio-tela_inicial_app_passageiro-0');
+                if (row0) row0.scrollIntoView({block: 'center', behavior: 'instant'});
+                """,
+            )
+
+        _scroll_passageiro_visivel()
+        time.sleep(0.85 if em_docker else 0.45)
+
+        # 1) Paridade com motorista: só JS nos radios + alteraVisibilidade (sem depender do clique no label)
+        driver.execute_script(
+            """
+            var sim = document.getElementById(arguments[0]);
+            var nao = document.getElementById(arguments[1]);
+            if (sim) sim.checked = true;
+            if (nao) nao.checked = false;
+        """,
+            f"{NOME_MOD}_exibir_anuncio_0",
+            f"{NOME_MOD}_exibir_anuncio_1",
+        )
+        driver.execute_script(f"alteraVisibilidadeCamposAnuncios('{TIPO}');")
+        log.info("alteraVisibilidadeCamposAnuncios chamada (bootstrap igual motorista).")
+
+        # Hook do painel que monta/recarrega blocos de anúncio premium (se existir)
+        driver.execute_script(
+            """
+            var t = arguments[0];
+            if (typeof exibirRecursoPremiumAnuncio === 'function') {
+                try { exibirRecursoPremiumAnuncio(t); } catch (e) {}
+            }
+            """,
+            TIPO,
+        )
+
+        _scroll_passageiro_visivel()
+        time.sleep(0.5 if em_docker else 0.25)
+
+        # 2) Reforço: label / radio clicáveis (alguns handlers só ligam ao click real)
         try:
             lbl_sim = driver.find_element(
                 By.CSS_SELECTOR, f'label[for="{NOME_MOD}_exibir_anuncio_0"]'
             )
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", lbl_sim)
-            time.sleep(0.15)
+            time.sleep(0.12)
             driver.execute_script("arguments[0].click();", lbl_sim)
             log.info("Clicou no label do radio Sim (passageiro).")
         except Exception:
@@ -1396,30 +1442,33 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
                 log.info("Clicou no radio Sim (passageiro).")
             except Exception:
                 pass
-        driver.execute_script("""
+
+        driver.execute_script(
+            """
             var sim = document.getElementById(arguments[0]);
             var nao = document.getElementById(arguments[1]);
             if (sim) sim.checked = true;
             if (nao) nao.checked = false;
-        """, f"{NOME_MOD}_exibir_anuncio_0", f"{NOME_MOD}_exibir_anuncio_1")
+        """,
+            f"{NOME_MOD}_exibir_anuncio_0",
+            f"{NOME_MOD}_exibir_anuncio_1",
+        )
         driver.execute_script(f"alteraVisibilidadeCamposAnuncios('{TIPO}');")
-        log.info("alteraVisibilidadeCamposAnuncios chamada.")
+        log.info("alteraVisibilidadeCamposAnuncios chamada (2ª vez, pós-clique).")
 
-        em_docker = os.environ.get("DOCKER", "").lower() in ("1", "true", "yes")
-        wait_secao = 55 if em_docker else 22
+        _scroll_passageiro_visivel()
+        time.sleep(1.1 if em_docker else 0.55)
+
+        wait_secao = 60 if em_docker else 24
 
         def _passageiro_add_foto_no_dom(d):
-            # Qualquer slot add-foto-{FIELD_ID}-N (não só índice 0); lista precisa existir.
+            # Não exigir lista-anuncios: em alguns builds ela existe vazia e os nós só aparecem depois.
             return d.execute_script(
                 """
-                var TIPO = arguments[0], fid = arguments[1];
-                var lista = document.getElementById('lista-anuncios-' + TIPO);
-                if (!lista) return false;
+                var fid = arguments[0];
                 var prefix = 'add-foto-' + fid + '-';
-                var nodes = document.querySelectorAll('[id^="' + prefix + '"]');
-                return nodes.length > 0;
+                return document.querySelectorAll('[id^="' + prefix + '"]').length > 0;
                 """,
-                TIPO,
                 FIELD_ID,
             )
 
@@ -1436,11 +1485,14 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
                     em_docker,
                     wait_secao,
                 )
-                driver.execute_script("""
-                    var el = document.getElementById('label-exibir-anuncio-tela_inicial_app_passageiro');
-                    if (el) el.scrollIntoView({block: 'center', behavior: 'instant'});
-                """)
-                time.sleep(0.5 if em_docker else 0.35)
+                try:
+                    driver.execute_script(
+                        "window.scrollTo(0, Math.max(0, document.body.scrollHeight - 400));"
+                    )
+                except Exception:
+                    pass
+                _scroll_passageiro_visivel()
+                time.sleep(0.45 if em_docker else 0.3)
                 driver.execute_script(
                     """
                     var sim = document.getElementById(arguments[0]);
@@ -1458,7 +1510,17 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
                 driver.execute_script(
                     f"if (typeof alteraVisibilidadeCamposAnuncios === 'function') alteraVisibilidadeCamposAnuncios('{TIPO}');"
                 )
-                time.sleep(2.2 if em_docker else 1.0)
+                driver.execute_script(
+                    """
+                    var t = arguments[0];
+                    if (typeof exibirRecursoPremiumAnuncio === 'function') {
+                        try { exibirRecursoPremiumAnuncio(t); } catch (e) {}
+                    }
+                    """,
+                    TIPO,
+                )
+                _scroll_passageiro_visivel()
+                time.sleep(2.6 if em_docker else 1.0)
 
         if not secao_ok:
             return {
