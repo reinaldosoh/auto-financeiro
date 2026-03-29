@@ -62,7 +62,7 @@ Em caso de falha de negócio, muitas rotas respondem **HTTP 400** com `detail` e
 | `chave_secreta`  | não         | `null`    | TOTP; omitir se já salvo no servidor                    |
 | `headless`       | não         | `true`    |                                                          |
 | `manter_aberto`  | não         | `false`   |                                                          |
-| `indice`         | não         | `null`    | **Só passageiro:** 0-based. Omitir = remover **todos**    |
+| `indice`         | não         | `null`    | **Só passageiro:** use `verificacao.dom_slot_idx` do disparo (sufixo DOM) **ou** posição 0-based na lista. Omitir = remover **todos** |
 
 A API aceita strings para `indice`, `headless` e `manter_aberto` (ex.: N8N) e converte quando possível.
 
@@ -237,7 +237,7 @@ Corpo: **`AnuncioMotoristaInput`** com:
 Corpo: **`RemoverAnuncioInput`**
 
 - **`indice` omitido ou `null`:** remove **todos** os anúncios de passageiro.
-- **`indice` inteiro 0-based:** remove só o anúncio na posição (0 = primeiro na ordem do painel, 1 = segundo, …).
+- **`indice` inteiro:** preferir o valor **`dom_slot_idx`** devolvido em `verificacao` no POST `/anuncio-passageiro` (é o sufixo da linha `anuncio-tela_inicial_app_passageiro-N` no painel). Se não existir linha com esse sufixo, o fluxo interpreta `indice` como posição **0-based** na lista ordenada de linhas. Em caso de timeout do painel para o índice pedido, tenta-se **fallback índice 0**.
 
 **Resposta 200:** `ResultadoOutput`
 
