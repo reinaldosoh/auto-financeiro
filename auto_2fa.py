@@ -57,6 +57,24 @@ def obter_chave(email: str) -> str:
     return dados.get(email.lower(), "")
 
 
+def mensagem_totp_ausente(cenario: str) -> str:
+    """
+    Texto para o cliente da API quando login exige TOTP mas não há segredo (corpo nem disco).
+    """
+    if cenario == "setup_2fa":
+        return (
+            "O painel abriu a configuração inicial do 2FA. No primeiro uso neste servidor, chame POST /autenticar "
+            "somente com email e senha (omitindo chave_secreta) para a automação concluir o assistente e gravar "
+            "o segredo TOTP no servidor. Depois, nas demais rotas (anúncio, remover, etc.), envie só email e senha."
+        )
+    return (
+        "O login pediu código 2FA, mas não há segredo salvo neste servidor e nenhum foi enviado no JSON. "
+        "Opções: (1) Chame POST /autenticar uma vez com email e senha para registrar o TOTP aqui; "
+        "(2) Ou envie chave_secreta no corpo se o cliente já tiver o segredo. "
+        "Em Docker/VPS, use volume persistente para o arquivo chaves_totp.json para não perder a chave ao redeploy."
+    )
+
+
 def gerar_codigo(chave_totp: str) -> str:
     """Gera o código TOTP de 6 dígitos a partir da chave."""
     totp = pyotp.TOTP(chave_totp)
@@ -1183,7 +1201,7 @@ def executar_adicionar_anuncio_motorista(email: str, senha: str, chave_secreta: 
         if cenario in ("login_2fa", "setup_2fa"):
             chave = chave_secreta or obter_chave(email)
             if not chave:
-                resultado["mensagem"] = "Cenário 2FA detectado, mas chave secreta não está disponível."
+                resultado["mensagem"] = mensagem_totp_ausente(cenario)
                 return resultado
             if not inserir_codigo_login_2fa(driver, chave):
                  resultado["mensagem"] = "Falha ao submeter código TOTP."
@@ -1305,7 +1323,7 @@ def executar_remover_anuncio_motorista(email: str, senha: str, chave_secreta: st
         if cenario in ("login_2fa", "setup_2fa"):
             chave = chave_secreta or obter_chave(email)
             if not chave:
-                resultado["mensagem"] = "Cenário 2FA detectado, mas chave secreta não está disponível."
+                resultado["mensagem"] = mensagem_totp_ausente(cenario)
                 return resultado
             if not inserir_codigo_login_2fa(driver, chave):
                 resultado["mensagem"] = "Falha ao submeter código TOTP."
@@ -1387,9 +1405,70 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
         driver.execute_script(f"alteraVisibilidadeCamposAnuncios('{TIPO}');")
         log.info("alteraVisibilidadeCamposAnuncios chamada.")
 
-        WebDriverWait(driver, 15).until(
-            lambda d: d.execute_script(f"return !!document.getElementById('add-foto-{FIELD_ID}-0');")
-        )
+        em_docker = os.environ.get("DOCKER", "").lower() in ("1", "true", "yes")
+        wait_secao = 55 if em_docker else 22
+
+        def _passageiro_add_foto_no_dom(d):
+            # Qualquer slot add-foto-{FIELD_ID}-N (não só índice 0); lista precisa existir.
+            return d.execute_script(
+                """
+                var TIPO = arguments[0], fid = arguments[1];
+                var lista = document.getElementById('lista-anuncios-' + TIPO);
+                if (!lista) return false;
+                var prefix = 'add-foto-' + fid + '-';
+                var nodes = document.querySelectorAll('[id^="' + prefix + '"]');
+                return nodes.length > 0;
+                """,
+                TIPO,
+                FIELD_ID,
+            )
+
+        secao_ok = False
+        for tentativa in range(2):
+            try:
+                WebDriverWait(driver, wait_secao).until(_passageiro_add_foto_no_dom)
+                secao_ok = True
+                break
+            except TimeoutException:
+                log.warning(
+                    "Timeout aguardando botões add-foto (passageiro), tentativa %s/2 (docker=%s, espera=%ss).",
+                    tentativa + 1,
+                    em_docker,
+                    wait_secao,
+                )
+                driver.execute_script("""
+                    var el = document.getElementById('label-exibir-anuncio-tela_inicial_app_passageiro');
+                    if (el) el.scrollIntoView({block: 'center', behavior: 'instant'});
+                """)
+                time.sleep(0.5 if em_docker else 0.35)
+                driver.execute_script(
+                    """
+                    var sim = document.getElementById(arguments[0]);
+                    var nao = document.getElementById(arguments[1]);
+                    if (sim) {
+                        sim.checked = true;
+                        try { sim.dispatchEvent(new Event('input', {bubbles: true})); } catch (e1) {}
+                        try { sim.dispatchEvent(new Event('change', {bubbles: true})); } catch (e2) {}
+                    }
+                    if (nao) nao.checked = false;
+                    """,
+                    f"{NOME_MOD}_exibir_anuncio_0",
+                    f"{NOME_MOD}_exibir_anuncio_1",
+                )
+                driver.execute_script(
+                    f"if (typeof alteraVisibilidadeCamposAnuncios === 'function') alteraVisibilidadeCamposAnuncios('{TIPO}');"
+                )
+                time.sleep(2.2 if em_docker else 1.0)
+
+        if not secao_ok:
+            return {
+                "sucesso": False,
+                "mensagem": (
+                    "Timeout: a seção de anúncio passageiro não mostrou os controles de upload a tempo. "
+                    "Em Docker/Xvfb isso é comum se a VPS estiver lenta — tente de novo ou aumente recursos. "
+                    "Confirme também permissão do recurso na bandeira e que a aba Recursos premium carregou por completo."
+                ),
+            }
 
         # 2. Índice do slot vazio: primeiro sem url_imagem (e não excluído); senão "+ Adicionar novo anúncio"
         NOVO_IDX = None
@@ -1424,7 +1503,8 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
                 continue
             if info.get("needAdd"):
                 try:
-                    btn = WebDriverWait(driver, 6).until(
+                    wait_add_btn = 16 if em_docker else 7
+                    btn = WebDriverWait(driver, wait_add_btn).until(
                         EC.element_to_be_clickable((By.ID, ADD_BTN_ID))
                     )
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
@@ -1434,7 +1514,7 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
                 except Exception as e_btn:
                     log.warning("Clique no botão adicionar falhou (%s); usando adicionarNovoAnuncio().", e_btn)
                     driver.execute_script(f"adicionarNovoAnuncio('{TIPO}');")
-                time.sleep(0.75)
+                time.sleep(1.25 if em_docker else 0.75)
                 continue
             NOVO_IDX = int(info["idx"])
             break
@@ -1447,7 +1527,8 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
         log.info("Usando slot anúncio passageiro idx=%s", NOVO_IDX)
 
         _add_foto_el = f"add-foto-{FIELD_ID}-{NOVO_IDX}"
-        WebDriverWait(driver, 10).until(
+        wait_slot = 28 if em_docker else 12
+        WebDriverWait(driver, wait_slot).until(
             lambda d, eid=_add_foto_el: d.execute_script(
                 "return !!document.getElementById(arguments[0]);",
                 eid,
@@ -1466,9 +1547,10 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
             f"{NOME_MOD}_{NOVO_IDX}_excluido",
         )
 
-        # Garantir que o input de link do índice existe (linha nova pode demorar após "+ Adicionar anúncio")
+        # Garantir que o input de link do índice existe (linha nova pode demorar após "+ Adicionar novo anúncio")
         try:
-            WebDriverWait(driver, 25).until(
+            wait_link = 42 if em_docker else 25
+            WebDriverWait(driver, wait_link).until(
                 lambda d, idx=NOVO_IDX, nm=NOME_MOD, fid=FIELD_ID: d.execute_script(
                     """
                     var idx = arguments[0], nm = arguments[1], fid = arguments[2];
@@ -1837,7 +1919,7 @@ def executar_adicionar_anuncio_passageiro(email: str, senha: str, chave_secreta:
         if cenario in ("login_2fa", "setup_2fa"):
             chave = chave_secreta or obter_chave(email)
             if not chave:
-                resultado["mensagem"] = "Cenário 2FA detectado, mas chave secreta não está disponível."
+                resultado["mensagem"] = mensagem_totp_ausente(cenario)
                 return resultado
             if not inserir_codigo_login_2fa(driver, chave):
                 resultado["mensagem"] = "Falha ao submeter código TOTP."
@@ -2153,7 +2235,7 @@ def executar_remover_anuncio_passageiro(
         if cenario in ("login_2fa", "setup_2fa"):
             chave = chave_secreta or obter_chave(email)
             if not chave:
-                resultado["mensagem"] = "Cenário 2FA detectado, mas chave secreta não está disponível."
+                resultado["mensagem"] = mensagem_totp_ausente(cenario)
                 return resultado
             if not inserir_codigo_login_2fa(driver, chave):
                 resultado["mensagem"] = "Falha ao submeter código TOTP."
@@ -2186,18 +2268,34 @@ def executar_remover_anuncio_passageiro(
 
 
 if __name__ == "__main__":
+    import getpass
     import sys
 
-    if len(sys.argv) >= 3:
-        email_arg = sys.argv[1]
-        senha_arg = sys.argv[2]
-        modo_headless = "--headless" in sys.argv
+    argv = sys.argv[1:]
+    modo_headless = "--headless" in argv
+    argv = [a for a in argv if a != "--headless"]
+
+    login_mode = False
+    email_arg = ""
+
+    if argv and argv[0] == "--login":
+        login_mode = True
+        # Navegador visível; o driver não recebe quit() até o usuário pressionar Enter abaixo
+        # (se o script Python termina antes, o Chrome costuma fechar junto).
+        email_arg = argv[1] if len(argv) >= 2 else input("Email: ").strip()
+        senha_arg = os.environ.get("TAXIMACHINE_SENHA", "").strip() or getpass.getpass("Senha: ")
+        if not senha_arg:
+            print("Senha obrigatória (digite no prompt ou exporte TAXIMACHINE_SENHA).", file=sys.stderr)
+            sys.exit(2)
+        res = executar_login(email_arg, senha_arg, headless=False, manter_aberto=True)
+    elif len(argv) >= 2:
+        email_arg, senha_arg = argv[0], argv[1]
+        res = executar_automacao(email_arg, senha_arg, headless=modo_headless)
     else:
         email_arg = input("Email: ").strip()
-        senha_arg = input("Senha: ").strip()
-        modo_headless = False
+        senha_arg = getpass.getpass("Senha: ")
+        res = executar_automacao(email_arg, senha_arg, headless=modo_headless)
 
-    res = executar_automacao(email_arg, senha_arg, headless=modo_headless)
     print("\n" + "=" * 50)
     print(f"  Resultado: {'✅ Sucesso' if res['sucesso'] else '❌ Falha'}")
     print(f"  Email: {res['email']}")
@@ -2205,3 +2303,47 @@ if __name__ == "__main__":
         print(f"  Chave TOTP: {res['chave_totp']}")
     print(f"  Mensagem: {res['mensagem']}")
     print("=" * 50)
+
+    if login_mode and res.get("sucesso"):
+        pause_raw = os.environ.get("TAXIMACHINE_PAUSE_SECONDS", "").strip()
+        if pause_raw:
+            try:
+                pause_sec = float(pause_raw)
+            except ValueError:
+                pause_sec = 0.0
+            if pause_sec > 0:
+                print(
+                    f"\n>>> Chrome aberto. Processo fica vivo {pause_sec:.0f}s "
+                    f"(TAXIMACHINE_PAUSE_SECONDS). Ctrl+C encerra antes.\n"
+                )
+                try:
+                    time.sleep(pause_sec)
+                except KeyboardInterrupt:
+                    print("\nInterrompido.", file=sys.stderr)
+        else:
+            print(
+                "\n>>> Chrome permanece aberto. Este terminal fica em pausa para o processo não morrer.\n"
+                "    Quando terminar no navegador, volte aqui e pressione ENTER para fechar o Chrome.\n"
+                "    (Sem TTY: defina TAXIMACHINE_PAUSE_SECONDS=600 para manter N segundos.)\n"
+            )
+            try:
+                input()
+            except EOFError:
+                print(
+                    "(Sem entrada interativa e sem TAXIMACHINE_PAUSE_SECONDS; encerrando — o Chrome pode fechar.)",
+                    file=sys.stderr,
+                )
+
+        # Fecha o WebDriver explicitamente (mesma chave usada em executar_login)
+        drv = _drivers_abertos.pop(email_arg, None)
+        if drv is None:
+            for k in list(_drivers_abertos.keys()):
+                if k.lower() == email_arg.lower():
+                    drv = _drivers_abertos.pop(k)
+                    break
+        if drv:
+            try:
+                drv.quit()
+            except Exception:
+                pass
+            log.info("Navegador encerrado após confirmação no terminal.")

@@ -1,6 +1,16 @@
 """
 API FastAPI para disparar a automação de 2FA e anúncios no TaxiMachine.
 
+Primeiro acesso (conta com 2FA, usuário só tem email e senha):
+    1) Chame POST {BASE_URL}/autenticar com {"email", "senha"} — sem chave_secreta.
+       A automação conclui o assistente de 2FA no TaxiMachine, obtém o segredo TOTP e
+       grava em chaves_totp.json no disco do servidor (o corpo de resposta também traz chave_totp).
+    2) Nas rotas seguintes (anúncio, remover, etc.), envie só email e senha; omita chave_secreta.
+       O servidor usa o segredo já salvo. Opcional: continue enviando chave_secreta se quiser
+       sobrescrever/forçar um segredo conhecido.
+    Em Docker/VPS, use volume persistente apontando para o diretório que contém chaves_totp.json,
+    senão a chave se perde a cada redeploy e o passo (1) precisa ser refeito.
+
 Uso local:
     uvicorn api_server:app --host 0.0.0.0 --port 8000 --reload
 
@@ -8,7 +18,7 @@ Chamada externa (substitua BASE_URL pela URL pública do serviço, ex. Easypanel
     POST {BASE_URL}/anuncio-passageiro
     Content-Type: application/json
     Corpo JSON (campos principais):
-      email, senha, chave_secreta (TOTP, se a conta pedir 2FA no login),
+      email, senha, chave_secreta (opcional após /autenticar ter gravado a chave no servidor),
       imagem_url OU imagem_base64,
       link_anuncio (obrigatório para passageiro),
       selecionar_todas (default true), headless (default true), manter_aberto (default false)
@@ -63,10 +73,11 @@ class CredenciaisInput(BaseModel):
 class RemoverAnuncioInput(BaseModel):
     email: str
     senha: str
+    # Opcional após POST /autenticar: o servidor lê chaves_totp.json se omitido (ver docstring do módulo).
     chave_secreta: str = None
     headless: bool = True
     manter_aberto: bool = False
-    # Só para /remover-anuncio-passageiro: 0 = primeiro anúncio, 1 = segundo, … Omita para remover todos.
+    # Só para /remover-anuncio-passageiro: 0 = primeiro anúncio, … Omita indice para remover todos.
     indice: Optional[int] = None
 
     @field_validator("indice", mode="before")
