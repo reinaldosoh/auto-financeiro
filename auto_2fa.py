@@ -1457,50 +1457,47 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
         log.info("alteraVisibilidadeCamposAnuncios chamada (2ª vez, pós-clique).")
 
         _scroll_passageiro_visivel()
-        time.sleep(1.1 if em_docker else 0.55)
+        time.sleep(1.0 if em_docker else 0.5)
 
-        wait_secao = 60 if em_docker else 24
+        # Esperar o CONTAINER DE LINHA (anuncio-TIPO-N) aparecer — igual ao remover, que funciona.
+        # NÃO esperar add-foto pois esse elemento fica oculto quando a imagem já existe.
+        wait_secao = 55 if em_docker else 22
 
-        def _passageiro_add_foto_no_dom(d):
-            # Não exigir lista-anuncios: em alguns builds ela existe vazia e os nós só aparecem depois.
+        def _passageiro_linha_no_dom(d):
             return d.execute_script(
                 """
-                var fid = arguments[0];
-                var prefix = 'add-foto-' + fid + '-';
-                return document.querySelectorAll('[id^="' + prefix + '"]').length > 0;
+                var TIPO = arguments[0];
+                var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
+                var els = document.querySelectorAll('[id]');
+                for (var i = 0; i < els.length; i++) {
+                    if (els[i].id.match(rowRe)) return true;
+                }
+                return false;
                 """,
-                FIELD_ID,
+                TIPO,
             )
 
         secao_ok = False
         for tentativa in range(2):
             try:
-                WebDriverWait(driver, wait_secao).until(_passageiro_add_foto_no_dom)
+                WebDriverWait(driver, wait_secao).until(_passageiro_linha_no_dom)
                 secao_ok = True
+                log.info("Seção passageiro carregada (container de linha encontrado).")
                 break
             except TimeoutException:
                 log.warning(
-                    "Timeout aguardando botões add-foto (passageiro), tentativa %s/2 (docker=%s, espera=%ss).",
+                    "Timeout aguardando container de linha (passageiro), tentativa %s/2 (docker=%s, espera=%ss).",
                     tentativa + 1,
                     em_docker,
                     wait_secao,
                 )
-                try:
-                    driver.execute_script(
-                        "window.scrollTo(0, Math.max(0, document.body.scrollHeight - 400));"
-                    )
-                except Exception:
-                    pass
-                _scroll_passageiro_visivel()
-                time.sleep(0.45 if em_docker else 0.3)
                 driver.execute_script(
                     """
                     var sim = document.getElementById(arguments[0]);
                     var nao = document.getElementById(arguments[1]);
                     if (sim) {
                         sim.checked = true;
-                        try { sim.dispatchEvent(new Event('input', {bubbles: true})); } catch (e1) {}
-                        try { sim.dispatchEvent(new Event('change', {bubbles: true})); } catch (e2) {}
+                        try { sim.dispatchEvent(new Event('change', {bubbles: true})); } catch(e) {}
                     }
                     if (nao) nao.checked = false;
                     """,
@@ -1510,73 +1507,67 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
                 driver.execute_script(
                     f"if (typeof alteraVisibilidadeCamposAnuncios === 'function') alteraVisibilidadeCamposAnuncios('{TIPO}');"
                 )
-                driver.execute_script(
-                    """
-                    var t = arguments[0];
-                    if (typeof exibirRecursoPremiumAnuncio === 'function') {
-                        try { exibirRecursoPremiumAnuncio(t); } catch (e) {}
-                    }
-                    """,
-                    TIPO,
-                )
                 _scroll_passageiro_visivel()
-                time.sleep(2.6 if em_docker else 1.0)
+                time.sleep(2.5 if em_docker else 1.0)
 
         if not secao_ok:
             return {
                 "sucesso": False,
                 "mensagem": (
-                    "Timeout: a seção de anúncio passageiro não mostrou os controles de upload a tempo. "
-                    "Em Docker/Xvfb isso é comum se a VPS estiver lenta — tente de novo ou aumente recursos. "
-                    "Confirme também permissão do recurso na bandeira e que a aba Recursos premium carregou por completo."
+                    "Timeout: a seção de anúncio passageiro não carregou. "
+                    "Verifique se o recurso 'Anúncio tela inicial app passageiro' está ativo na bandeira."
                 ),
             }
 
-        # 2. Índice do slot vazio: primeiro sem url_imagem (e não excluído); senão "+ Adicionar novo anúncio"
+        # 2. Descobrir próximo índice via containers de linha. Se todos ocupados → clicar "+ Adicionar novo anúncio".
         NOVO_IDX = None
         for _ in range(18):
             info = driver.execute_script(
                 """
                 var FIELD_ID = arguments[0], NOME_MOD = arguments[1], TIPO = arguments[2];
+                var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
+                var rows = [];
+                var els = document.querySelectorAll('[id]');
+                for (var i = 0; i < els.length; i++) {
+                    var m = els[i].id.match(rowRe);
+                    if (m) rows.push(parseInt(m[1], 10));
+                }
+                if (rows.length === 0) return {ok: false};
+                rows.sort(function(a, b) { return a - b; });
                 var lista = typeof obterListaAnuncio === 'function' ? obterListaAnuncio(TIPO) : null;
-                var i = 0;
-                while (document.getElementById('add-foto-' + FIELD_ID + '-' + i)) i++;
-                var maxIdx = i - 1;
-                if (maxIdx < 0) return {ok: false};
-                for (var j = 0; j <= maxIdx; j++) {
-                    var elImg = document.getElementById(NOME_MOD + '_' + j + '_url_imagem');
-                    var elExc = document.getElementById(NOME_MOD + '_' + j + '_excluido');
-                    var vDom = elImg && elImg.value ? String(elImg.value).trim() : '';
-                    var excl = elExc && String(elExc.value) === '1';
-                    var row = lista && lista[j];
+                for (var j = 0; j < rows.length; j++) {
+                    var idx = rows[j];
+                    var elImg = document.getElementById(NOME_MOD + '_' + idx + '_url_imagem');
+                    var elExc = document.getElementById(NOME_MOD + '_' + idx + '_excluido');
+                    var vDom  = elImg && elImg.value ? String(elImg.value).trim() : '';
+                    var excl  = elExc && String(elExc.value) === '1';
+                    var row   = lista && lista[idx];
                     var vList = row && row.url_imagem ? String(row.url_imagem).trim() : '';
                     var uList = row && row.url_anuncio ? String(row.url_anuncio).trim() : '';
                     var ocupado = !excl && (vDom.length > 0 || vList.length > 0 || uList.length > 0);
-                    if (!ocupado) return {ok: true, idx: j, needAdd: false};
+                    if (!ocupado) return {ok: true, idx: idx, needAdd: false};
                 }
-                return {ok: true, idx: maxIdx + 1, needAdd: true};
+                return {ok: true, idx: rows[rows.length - 1] + 1, needAdd: true};
                 """,
                 FIELD_ID,
                 NOME_MOD,
                 TIPO,
             )
             if not info or not info.get("ok"):
-                time.sleep(0.35)
+                time.sleep(0.5)
                 continue
             if info.get("needAdd"):
+                # Todos os slots ocupados → clicar "+ Adicionar novo anúncio"
                 try:
-                    wait_add_btn = 16 if em_docker else 7
-                    btn = WebDriverWait(driver, wait_add_btn).until(
-                        EC.element_to_be_clickable((By.ID, ADD_BTN_ID))
-                    )
+                    btn = driver.find_element(By.ID, ADD_BTN_ID)
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
                     time.sleep(0.15)
                     driver.execute_script("arguments[0].click();", btn)
                     log.info("Clicou em '+ Adicionar novo anúncio' (%s).", ADD_BTN_ID)
                 except Exception as e_btn:
-                    log.warning("Clique no botão adicionar falhou (%s); usando adicionarNovoAnuncio().", e_btn)
+                    log.warning("Botão add não encontrado (%s); usando adicionarNovoAnuncio().", e_btn)
                     driver.execute_script(f"adicionarNovoAnuncio('{TIPO}');")
-                time.sleep(1.25 if em_docker else 0.75)
+                time.sleep(1.5 if em_docker else 0.8)
                 continue
             NOVO_IDX = int(info["idx"])
             break
@@ -1588,14 +1579,19 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
             }
         log.info("Usando slot anúncio passageiro idx=%s", NOVO_IDX)
 
+        # Garante que o botão add-foto do novo slot existe (slot criado por adicionarNovoAnuncio pode demorar).
         _add_foto_el = f"add-foto-{FIELD_ID}-{NOVO_IDX}"
-        wait_slot = 28 if em_docker else 12
-        WebDriverWait(driver, wait_slot).until(
-            lambda d, eid=_add_foto_el: d.execute_script(
-                "return !!document.getElementById(arguments[0]);",
-                eid,
+        wait_slot = 35 if em_docker else 15
+        try:
+            WebDriverWait(driver, wait_slot).until(
+                lambda d, eid=_add_foto_el: d.execute_script(
+                    "return !!document.getElementById(arguments[0]);",
+                    eid,
+                )
             )
-        )
+        except TimeoutException:
+            # Se o elemento continua ausente, o upload ainda pode funcionar via XHR sem precisar do botão
+            log.warning("add-foto do slot %s não apareceu; tentando upload direto.", NOVO_IDX)
 
         # Reativar slot se estiver apenas marcado como excluído (reuso sem novo índice)
         driver.execute_script(
