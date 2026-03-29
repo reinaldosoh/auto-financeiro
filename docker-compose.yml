@@ -2,6 +2,8 @@ version: "3.8"
 
 services:
   auto-financeiro:
+    # Chrome .deb do Dockerfile é amd64; no Mac ARM isso evita build quebrado / divergência com a VPS
+    platform: linux/amd64
     build: .
     container_name: auto-financeiro-api
     restart: unless-stopped

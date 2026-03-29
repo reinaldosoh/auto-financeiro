@@ -9,6 +9,9 @@ import json
 import os
 import re
 import base64
+import platform
+import subprocess
+import stat
 import pyotp
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -16,7 +19,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 
 logging.basicConfig(
@@ -81,6 +84,30 @@ def gerar_codigo(chave_totp: str) -> str:
     return totp.now()
 
 
+def _macos_strip_quarantine_driver_caches() -> None:
+    """
+    No macOS, chromedriver baixado costuma vir com com.apple.quarantine; o sistema pode
+    matar o processo com SIGKILL (Selenium reporta exit -9). xattr -cr remove isso.
+    """
+    if platform.system() != "Darwin":
+        return
+    for base in (
+        os.path.expanduser("~/.wdm/drivers/chromedriver"),
+        os.path.expanduser("~/.cache/selenium"),
+    ):
+        if not os.path.exists(base):
+            continue
+        try:
+            subprocess.run(
+                ["xattr", "-cr", base],
+                check=False,
+                capture_output=True,
+                timeout=120,
+            )
+        except Exception as e:
+            log.debug("xattr -cr %s: %s", base, e)
+
+
 def criar_driver(headless: bool = False) -> webdriver.Chrome:
     """Cria e retorna uma instância do Chrome WebDriver.
     
@@ -111,8 +138,41 @@ def criar_driver(headless: bool = False) -> webdriver.Chrome:
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
 
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=opts)
+    chrome_bin = os.environ.get("CHROME_BINARY") or os.environ.get("GOOGLE_CHROME_BIN")
+    if chrome_bin and os.path.isfile(chrome_bin):
+        opts.binary_location = chrome_bin
+
+    _macos_strip_quarantine_driver_caches()
+
+    # 1) Selenium 4.6+ resolve driver sozinho (Selenium Manager) — evita binário do
+    #    webdriver-manager frequentemente bloqueado no macOS.
+    # 2) Fallback: webdriver-manager após xattr no arquivo.
+    driver = None
+    try:
+        driver = webdriver.Chrome(options=opts)
+    except WebDriverException as e:
+        log.warning(
+            "Chrome via Selenium Manager falhou (%s); tentando webdriver-manager…",
+            e.msg if hasattr(e, "msg") else e,
+        )
+        path = ChromeDriverManager().install()
+        try:
+            if platform.system() == "Darwin" and os.path.isfile(path):
+                subprocess.run(
+                    ["xattr", "-cr", path],
+                    check=False,
+                    capture_output=True,
+                    timeout=30,
+                )
+                os.chmod(path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+        except Exception as fix_e:
+            log.warning("Ajuste pós-download chromedriver: %s", fix_e)
+        try:
+            driver = webdriver.Chrome(service=Service(path), options=opts)
+        except WebDriverException as e2:
+            log.error("Chrome também falhou com webdriver-manager.")
+            raise e2 from e
+
     driver.implicitly_wait(5)
     return driver
 
@@ -1357,23 +1417,50 @@ def executar_remover_anuncio_motorista(email: str, senha: str, chave_secreta: st
 
 def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecionar_todas=True):
     """
-    Adiciona anúncio na seção "Adicionar anúncio na tela inicial do app passageiro".
+    Adiciona anúncio na seção do app passageiro (até 3 anúncios no painel).
 
-    Fluxo alinhado à UI: Sim → slot vazio (índice 0 se novo) ou, se já houver anúncio ativo
-    com imagem/link, clica em "+ Adicionar novo anúncio" (id adicionar-novo-anuncio-...).
-    A imagem é enviada como no fluxo manual (XHR); o link vai no campo "Link para o anúncio".
+    Mesma jornada base do motorista: Sim → ``add-foto-…-0`` → marca índice 0 excluído →
+    ``adicionarNovoAnuncio``. O **índice do novo slot** não é fixo: com vários anúncios o
+    painel acrescenta a linha no próximo índice (1, 2 ou 3). Detectamos pelo maior ``N`` em
+    ``add-foto-{FIELD_ID}-N`` após o incremento em relação ao estado antes de ``adicionarNovoAnuncio``.
+    Scroll inicial compensa o bloco passageiro abaixo do motorista (Docker/headless).
     """
     log.info("Configurando anúncio na tela inicial do app passageiro")
     TIPO      = "tela_inicial_app_passageiro"
-    NOME_MOD  = "AnuncioAppPassageiro"
+    # Prefixo real do formulário no HTML (MAP_ANUNCIO em pagina.html), não "AnuncioAppPassageiro".
+    NOME_MOD  = "AnuncioTelaInicialAppPass"
     FIELD_ID  = f"anuncio-{TIPO}"
-    ADD_BTN_ID = f"adicionar-novo-anuncio-{TIPO}"
-    em_docker = os.environ.get("DOCKER", "").lower() in ("1", "true", "yes")
+
+    def _max_add_foto_index(d, fid: str) -> int:
+        return d.execute_script(
+            """
+            var fid = arguments[0];
+            var prefix = 'add-foto-' + fid + '-';
+            var max = -1;
+            var els = document.querySelectorAll('[id]');
+            for (var i = 0; i < els.length; i++) {
+                var id = els[i].id;
+                if (id.indexOf(prefix) !== 0) continue;
+                var rest = id.substring(prefix.length);
+                var n = parseInt(rest, 10);
+                if (!isNaN(n) && n > max) max = n;
+            }
+            return max;
+            """,
+            fid,
+        )
 
     try:
-        # Passageiro fica abaixo do motorista na mesma aba. No Docker/Xvfb o bloco pode não
-        # renderizar add-foto até estar no viewport — o fluxo do motorista não sofre tanto
-        # porque vem primeiro. Scroll agressivo + mesmo bootstrap JS do motorista.
+        link_limpo = (link_anuncio or "").strip()
+        if not link_limpo:
+            return {
+                "sucesso": False,
+                "mensagem": "link_anuncio é obrigatório: o painel valida o link ao salvar.",
+            }
+
+        em_docker = os.environ.get("DOCKER", "").lower() in ("1", "true", "yes")
+        # Local/headless: página pesada + bloco passageiro abaixo do motorista — 12s era curto demais.
+        wait_slot = 45 if em_docker else 28
 
         def _scroll_passageiro_visivel():
             driver.execute_script(
@@ -1381,35 +1468,45 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
                 var ids = [
                     'label-exibir-anuncio-tela_inicial_app_passageiro',
                     'lista-anuncios-tela_inicial_app_passageiro',
-                    'adicionar-novo-anuncio-tela_inicial_app_passageiro'
+                    'anuncio-tela_inicial_app_passageiro-0'
                 ];
                 for (var i = 0; i < ids.length; i++) {
                     var e = document.getElementById(ids[i]);
                     if (e) e.scrollIntoView({block: 'center', behavior: 'instant'});
                 }
-                var row0 = document.getElementById('anuncio-tela_inicial_app_passageiro-0');
-                if (row0) row0.scrollIntoView({block: 'center', behavior: 'instant'});
                 """,
             )
 
+        def _bootstrap_passageiro():
+            driver.execute_script(
+                """
+                var sim = document.getElementById(arguments[0]);
+                var nao = document.getElementById(arguments[1]);
+                if (sim) sim.checked = true;
+                if (nao) nao.checked = false;
+                """,
+                f"{NOME_MOD}_exibir_anuncio_0",
+                f"{NOME_MOD}_exibir_anuncio_1",
+            )
+            driver.execute_script(f"alteraVisibilidadeCamposAnuncios('{TIPO}');")
+
+        def _passageiro_slot0_pronto(d, fid=FIELD_ID, tipo=TIPO):
+            """Com imagem já salva o painel esconde add-foto-0; a linha anuncio-TIPO-0 basta."""
+            return d.execute_script(
+                """
+                var fid = arguments[0], tipo = arguments[1];
+                if (document.getElementById('add-foto-' + fid + '-0')) return true;
+                if (document.getElementById('anuncio-' + tipo + '-0')) return true;
+                return false;
+                """,
+                fid,
+                tipo,
+            )
+
         _scroll_passageiro_visivel()
-        time.sleep(0.85 if em_docker else 0.45)
+        time.sleep(0.55 if em_docker else 0.3)
 
-        # 1) Paridade com motorista: só JS nos radios + alteraVisibilidade (sem depender do clique no label)
-        driver.execute_script(
-            """
-            var sim = document.getElementById(arguments[0]);
-            var nao = document.getElementById(arguments[1]);
-            if (sim) sim.checked = true;
-            if (nao) nao.checked = false;
-        """,
-            f"{NOME_MOD}_exibir_anuncio_0",
-            f"{NOME_MOD}_exibir_anuncio_1",
-        )
-        driver.execute_script(f"alteraVisibilidadeCamposAnuncios('{TIPO}');")
-        log.info("alteraVisibilidadeCamposAnuncios chamada (bootstrap igual motorista).")
-
-        # Hook do painel que monta/recarrega blocos de anúncio premium (se existir)
+        _bootstrap_passageiro()
         driver.execute_script(
             """
             var t = arguments[0];
@@ -1419,195 +1516,96 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
             """,
             TIPO,
         )
+        time.sleep(0.35 if em_docker else 0.2)
 
-        _scroll_passageiro_visivel()
-        time.sleep(0.5 if em_docker else 0.25)
-
-        # 2) Reforço: label / radio clicáveis (alguns handlers só ligam ao click real)
-        try:
-            lbl_sim = driver.find_element(
-                By.CSS_SELECTOR, f'label[for="{NOME_MOD}_exibir_anuncio_0"]'
-            )
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", lbl_sim)
-            time.sleep(0.12)
-            driver.execute_script("arguments[0].click();", lbl_sim)
-            log.info("Clicou no label do radio Sim (passageiro).")
-        except Exception:
+        slot0_ok = False
+        for tent in range(3):
             try:
-                sim_el = WebDriverWait(driver, 8).until(
-                    EC.presence_of_element_located((By.ID, f"{NOME_MOD}_exibir_anuncio_0"))
+                WebDriverWait(driver, wait_slot).until(_passageiro_slot0_pronto)
+                slot0_ok = True
+                tem_add = driver.execute_script(
+                    "return !!document.getElementById('add-foto-' + arguments[0] + '-0');",
+                    FIELD_ID,
                 )
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sim_el)
-                driver.execute_script("arguments[0].click();", sim_el)
-                log.info("Clicou no radio Sim (passageiro).")
-            except Exception:
-                pass
-
-        driver.execute_script(
-            """
-            var sim = document.getElementById(arguments[0]);
-            var nao = document.getElementById(arguments[1]);
-            if (sim) sim.checked = true;
-            if (nao) nao.checked = false;
-        """,
-            f"{NOME_MOD}_exibir_anuncio_0",
-            f"{NOME_MOD}_exibir_anuncio_1",
-        )
-        driver.execute_script(f"alteraVisibilidadeCamposAnuncios('{TIPO}');")
-        log.info("alteraVisibilidadeCamposAnuncios chamada (2ª vez, pós-clique).")
-
-        _scroll_passageiro_visivel()
-        time.sleep(1.0 if em_docker else 0.5)
-
-        # Esperar o CONTAINER DE LINHA (anuncio-TIPO-N) aparecer — igual ao remover, que funciona.
-        # NÃO esperar add-foto pois esse elemento fica oculto quando a imagem já existe.
-        wait_secao = 55 if em_docker else 22
-
-        def _passageiro_linha_no_dom(d):
-            return d.execute_script(
-                """
-                var TIPO = arguments[0];
-                var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
-                var els = document.querySelectorAll('[id]');
-                for (var i = 0; i < els.length; i++) {
-                    if (els[i].id.match(rowRe)) return true;
-                }
-                return false;
-                """,
-                TIPO,
-            )
-
-        secao_ok = False
-        for tentativa in range(2):
-            try:
-                WebDriverWait(driver, wait_secao).until(_passageiro_linha_no_dom)
-                secao_ok = True
-                log.info("Seção passageiro carregada (container de linha encontrado).")
+                log.info(
+                    "Passageiro: slot índice 0 pronto (add_foto=%s, linha anuncio ok).",
+                    tem_add,
+                )
                 break
             except TimeoutException:
-                log.warning(
-                    "Timeout aguardando container de linha (passageiro), tentativa %s/2 (docker=%s, espera=%ss).",
-                    tentativa + 1,
-                    em_docker,
-                    wait_secao,
-                )
+                log.warning("Passageiro: timeout slot 0 (add-foto ou linha), reforço %s/3", tent + 1)
+                _scroll_passageiro_visivel()
+                time.sleep(0.45 if em_docker else 0.25)
+                _bootstrap_passageiro()
                 driver.execute_script(
                     """
-                    var sim = document.getElementById(arguments[0]);
-                    var nao = document.getElementById(arguments[1]);
-                    if (sim) {
-                        sim.checked = true;
-                        try { sim.dispatchEvent(new Event('change', {bubbles: true})); } catch(e) {}
+                    var t = arguments[0];
+                    if (typeof exibirRecursoPremiumAnuncio === 'function') {
+                        try { exibirRecursoPremiumAnuncio(t); } catch (e) {}
                     }
-                    if (nao) nao.checked = false;
                     """,
-                    f"{NOME_MOD}_exibir_anuncio_0",
-                    f"{NOME_MOD}_exibir_anuncio_1",
+                    TIPO,
                 )
-                driver.execute_script(
-                    f"if (typeof alteraVisibilidadeCamposAnuncios === 'function') alteraVisibilidadeCamposAnuncios('{TIPO}');"
-                )
-                _scroll_passageiro_visivel()
-                time.sleep(2.5 if em_docker else 1.0)
+                time.sleep(1.8 if em_docker else 0.9)
 
-        if not secao_ok:
+        if not slot0_ok:
             return {
                 "sucesso": False,
                 "mensagem": (
-                    "Timeout: a seção de anúncio passageiro não carregou. "
-                    "Verifique se o recurso 'Anúncio tela inicial app passageiro' está ativo na bandeira."
+                    "A seção de anúncio passageiro não carregou (linha índice 0 nem botão add-foto). "
+                    "Confirme 'Sim' no recurso e que o anúncio passageiro está habilitado na bandeira."
                 ),
             }
 
-        # 2. Descobrir próximo índice via containers de linha. Se todos ocupados → clicar "+ Adicionar novo anúncio".
-        NOVO_IDX = None
-        for _ in range(18):
-            info = driver.execute_script(
-                """
-                var FIELD_ID = arguments[0], NOME_MOD = arguments[1], TIPO = arguments[2];
-                var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
-                var rows = [];
-                var els = document.querySelectorAll('[id]');
-                for (var i = 0; i < els.length; i++) {
-                    var m = els[i].id.match(rowRe);
-                    if (m) rows.push(parseInt(m[1], 10));
-                }
-                if (rows.length === 0) return {ok: false};
-                rows.sort(function(a, b) { return a - b; });
-                var lista = typeof obterListaAnuncio === 'function' ? obterListaAnuncio(TIPO) : null;
-                for (var j = 0; j < rows.length; j++) {
-                    var idx = rows[j];
-                    var elImg = document.getElementById(NOME_MOD + '_' + idx + '_url_imagem');
-                    var elExc = document.getElementById(NOME_MOD + '_' + idx + '_excluido');
-                    var vDom  = elImg && elImg.value ? String(elImg.value).trim() : '';
-                    var excl  = elExc && String(elExc.value) === '1';
-                    var row   = lista && lista[idx];
-                    var vList = row && row.url_imagem ? String(row.url_imagem).trim() : '';
-                    var uList = row && row.url_anuncio ? String(row.url_anuncio).trim() : '';
-                    var ocupado = !excl && (vDom.length > 0 || vList.length > 0 || uList.length > 0);
-                    if (!ocupado) return {ok: true, idx: idx, needAdd: false};
-                }
-                return {ok: true, idx: rows[rows.length - 1] + 1, needAdd: true};
-                """,
-                FIELD_ID,
-                NOME_MOD,
-                TIPO,
-            )
-            if not info or not info.get("ok"):
-                time.sleep(0.5)
-                continue
-            if info.get("needAdd"):
-                # Todos os slots ocupados → clicar "+ Adicionar novo anúncio"
-                try:
-                    btn = driver.find_element(By.ID, ADD_BTN_ID)
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                    time.sleep(0.15)
-                    driver.execute_script("arguments[0].click();", btn)
-                    log.info("Clicou em '+ Adicionar novo anúncio' (%s).", ADD_BTN_ID)
-                except Exception as e_btn:
-                    log.warning("Botão add não encontrado (%s); usando adicionarNovoAnuncio().", e_btn)
-                    driver.execute_script(f"adicionarNovoAnuncio('{TIPO}');")
-                time.sleep(1.5 if em_docker else 0.8)
-                continue
-            NOVO_IDX = int(info["idx"])
-            break
-
-        if NOVO_IDX is None:
-            return {
-                "sucesso": False,
-                "mensagem": "Não foi possível obter um slot vazio para o anúncio (passageiro).",
-            }
-        log.info("Usando slot anúncio passageiro idx=%s", NOVO_IDX)
-
-        # Garante que o botão add-foto do novo slot existe (slot criado por adicionarNovoAnuncio pode demorar).
-        _add_foto_el = f"add-foto-{FIELD_ID}-{NOVO_IDX}"
-        wait_slot = 35 if em_docker else 15
-        try:
-            WebDriverWait(driver, wait_slot).until(
-                lambda d, eid=_add_foto_el: d.execute_script(
-                    "return !!document.getElementById(arguments[0]);",
-                    eid,
-                )
-            )
-        except TimeoutException:
-            # Se o elemento continua ausente, o upload ainda pode funcionar via XHR sem precisar do botão
-            log.warning("add-foto do slot %s não apareceu; tentando upload direto.", NOVO_IDX)
-
-        # Reativar slot se estiver apenas marcado como excluído (reuso sem novo índice)
         driver.execute_script(
             """
             var elExc = document.getElementById(arguments[0]);
-            if (elExc && String(elExc.value) === '1') {
-                elExc.value = '0';
-                if (window.jQuery) jQuery(elExc).val('0');
+            if (elExc) {
+                elExc.value = '1';
+                if (window.jQuery) jQuery(elExc).val('1');
             }
             """,
-            f"{NOME_MOD}_{NOVO_IDX}_excluido",
+            f"{NOME_MOD}_0_excluido",
         )
+        log.info("Passageiro: índice 0 marcado excluído (igual motorista).")
 
-        # Garantir que o input de link do índice existe (linha nova pode demorar após "+ Adicionar novo anúncio")
+        max_before = _max_add_foto_index(driver, FIELD_ID)
+        log.info("Passageiro: maior índice add-foto antes de adicionarNovoAnuncio: %s", max_before)
+
+        driver.execute_script(f"adicionarNovoAnuncio('{TIPO}');")
+        time.sleep(0.65 if em_docker else 0.45)
+
         try:
-            wait_link = 42 if em_docker else 25
+            WebDriverWait(driver, wait_slot).until(
+                lambda d, fid=FIELD_ID, mb=max_before: _max_add_foto_index(d, fid) > mb
+            )
+        except TimeoutException:
+            return {
+                "sucesso": False,
+                "mensagem": (
+                    "Novo slot passageiro não apareceu após adicionarNovoAnuncio. "
+                    "Pode ser limite de 3 anúncios ativos ou falha do painel — remova um anúncio e tente de novo."
+                ),
+            }
+
+        NOVO_IDX = _max_add_foto_index(driver, FIELD_ID)
+        if NOVO_IDX < 0:
+            return {
+                "sucesso": False,
+                "mensagem": "Não foi possível determinar o índice do novo anúncio passageiro.",
+            }
+
+        if not driver.execute_script(
+            "return !!document.getElementById('add-foto-' + arguments[0] + '-' + String(arguments[1]));",
+            FIELD_ID,
+            NOVO_IDX,
+        ):
+            log.warning("add-foto ausente no índice %s; seguindo (upload XHR não depende do botão).", NOVO_IDX)
+
+        log.info("Passageiro: novo slot detectado idx=%s (até 3 anúncios no painel).", NOVO_IDX)
+
+        try:
+            wait_link = 45 if em_docker else 25
             WebDriverWait(driver, wait_link).until(
                 lambda d, idx=NOVO_IDX, nm=NOME_MOD, fid=FIELD_ID: d.execute_script(
                     """
@@ -1629,8 +1627,7 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
             return {
                 "sucesso": False,
                 "mensagem": (
-                    f"O campo de link do anúncio (índice {NOVO_IDX}) não apareceu no DOM a tempo. "
-                    "Aguarde a página carregar ou adicione o anúncio manualmente uma vez."
+                    f"O campo de link do anúncio (índice {NOVO_IDX}) não apareceu no DOM a tempo."
                 ),
             }
 
@@ -1683,13 +1680,6 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
         url_s3    = upload_result["urlS3"]
         foto_name = upload_result.get("fotoName", "banner.jpeg")
         log.info(f"Upload OK: {url_s3}")
-
-        link_limpo = (link_anuncio or "").strip()
-        if not link_limpo:
-            return {
-                "sucesso": False,
-                "mensagem": "link_anuncio é obrigatório: o painel valida o link ao salvar.",
-            }
 
         # 6–7. Preview, url_imagem, url_anuncio (mesma ordem do debug_intercept) + eventos nativos no link
         ok_campos = driver.execute_script(
@@ -2016,7 +2006,7 @@ def executar_adicionar_anuncio_passageiro(email: str, senha: str, chave_secreta:
 def _preparar_secao_anuncio_passageiro(driver) -> None:
     """Rola até a seção e garante radio Sim + campos visíveis."""
     TIPO = "tela_inicial_app_passageiro"
-    NOME_MOD = "AnuncioAppPassageiro"
+    NOME_MOD = "AnuncioTelaInicialAppPass"
     driver.execute_script("""
         var el = document.getElementById('label-exibir-anuncio-tela_inicial_app_passageiro');
         if (el) el.scrollIntoView({block: 'center', behavior: 'instant'});
