@@ -2023,6 +2023,15 @@ def _preparar_secao_anuncio_passageiro(driver) -> None:
         f"{NOME_MOD}_exibir_anuncio_1",
     )
     driver.execute_script(f"if (typeof alteraVisibilidadeCamposAnuncios === 'function') alteraVisibilidadeCamposAnuncios('{TIPO}');")
+    driver.execute_script(
+        """
+        var t = arguments[0];
+        if (typeof exibirRecursoPremiumAnuncio === 'function') {
+            try { exibirRecursoPremiumAnuncio(t); } catch (e) {}
+        }
+        """,
+        TIPO,
+    )
     time.sleep(0.45)
 
 
@@ -2182,16 +2191,28 @@ def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
                         return true;
                     }
                 }
-                var nodes = document.querySelectorAll('a[onclick*="removerAnuncio"], button[onclick*="removerAnuncio"], [onclick*="removerAnuncio"]');
+                var nodes = document.querySelectorAll('[onclick*="deletarAnuncio"], [onclick*="removerAnuncio"]');
                 for (var n = 0; n < nodes.length; n++) {
                     var oc = nodes[n].getAttribute('onclick') || '';
-                    if (oc.indexOf(TIPO) === -1 || oc.indexOf('removerAnuncio') === -1) continue;
+                    if (oc.indexOf(TIPO) === -1) continue;
+                    var mDel = oc.match(/deletarAnuncio\\s*\\(\\s*(\\d+)\\s*,\\s*['\"]([^'\"]+)['\"]\\s*\\)/);
+                    if (mDel && mDel[2] === TIPO && parseInt(mDel[1], 10) === wantIdx) {
+                        nodes[n].scrollIntoView({block: 'center', behavior: 'instant'});
+                        nodes[n].click();
+                        return true;
+                    }
                     var m2 = oc.match(/removerAnuncio\\s*\\(\\s*['\"]([^'\"]+)['\"]\\s*,\\s*(\\d+)\\s*\\)/);
                     if (m2 && m2[1] === TIPO && parseInt(m2[2], 10) === wantIdx) {
                         nodes[n].scrollIntoView({block: 'center', behavior: 'instant'});
                         nodes[n].click();
                         return true;
                     }
+                }
+                if (typeof deletarAnuncio === 'function') {
+                    try {
+                        deletarAnuncio(wantIdx, TIPO);
+                        return true;
+                    } catch (e) {}
                 }
                 if (typeof removerAnuncio === 'function') {
                     try {
@@ -2226,30 +2247,18 @@ def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
             "mensagem": f"Anúncio de passageiro no índice {indice} removido e alterações salvas.",
         }
 
+    # Remover todos: repetir remoção do índice 0 (primeiro da lista ordenada) até falhar.
+    # Cada chamada com indice=0 já confirma alert e salva — evita XPath errado (removerAnuncio vs deletarAnuncio).
     removidos = 0
-    while True:
-        try:
-            btn = driver.find_element(
-                By.XPATH,
-                f'//*[@onclick[contains(., "removerAnuncio") and contains(., "{TIPO}")]]',
-            )
-            driver.execute_script("arguments[0].click();", btn)
-            time.sleep(1)
-            try:
-                driver.switch_to.alert.accept()
-            except Exception:
-                pass
-            time.sleep(2)
-            removidos += 1
-        except NoSuchElementException:
+    for _ in range(30):
+        ret_um = remover_anuncio_passageiro(driver, indice=0)
+        if not ret_um.get("sucesso"):
             break
+        removidos += 1
 
     if removidos == 0:
         return {"sucesso": False, "mensagem": "Nenhum anúncio de passageiro encontrado para remover."}
 
-    salvo = _salvar_alteracoes_bandeira(driver)
-    if not salvo["ok"]:
-        return {"sucesso": False, "mensagem": f"Falha ao salvar após remover: {salvo['erro']}"}
     return {
         "sucesso": True,
         "mensagem": f"{removidos} anúncio(s) de passageiro removido(s) com sucesso!",
