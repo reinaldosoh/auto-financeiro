@@ -77,7 +77,8 @@ class RemoverAnuncioInput(BaseModel):
     chave_secreta: str = None
     headless: bool = True
     manter_aberto: bool = False
-    # Só para /remover-anuncio-passageiro: 0 = primeiro anúncio, … Omita indice para remover todos.
+    # /remover-anuncio-passageiro: use o dom_slot_idx do disparo (sufixo DOM) OU posição 0-based na lista.
+    # Omita indice para remover todos.
     indice: Optional[int] = None
 
     @field_validator("indice", mode="before")
@@ -431,7 +432,8 @@ async def anuncio_passageiro(input_data: AnuncioMotoristaInput):
 async def remover_anuncio_passageiro_endpoint(creds: RemoverAnuncioInput):
     """
     Remove anúncios de passageiro na tela inicial do app.
-    Envie `indice` (0-based) para remover só uma campanha; omita `indice` para remover todas.
+    Envie `indice` igual ao `dom_slot_idx` devolvido no disparo (sufixo da linha no painel) ou posição
+    na lista ordenada (0 = primeiro). Omita `indice` para remover todas.
     """
     log.info(
         "Requisição (remover-anuncio-passageiro) para: %s indice=%s",

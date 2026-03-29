@@ -2059,7 +2059,11 @@ def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
     """
     Remove anúncio(s) de passageiro (tela inicial do app passageiro).
 
-    :param indice: Índice 0-based do anúncio (0 = primeiro na lista do painel). Se None, remove todos.
+    :param indice: Pode ser (1) o **sufixo DOM** retornado pela Machine em ``dom_slot_idx``
+      (ex.: linha ``anuncio-tela_inicial_app_passageiro-1``), ou (2) a **posição 0-based**
+      na lista ordenada de linhas (0 = primeiro anúncio). Se existir ``#anuncio-TIPO-{indice}``,
+      usa-se como slot DOM; senão, ``indice`` é tratado como posição na lista ordenada por ``ord``.
+      Se None, remove todos (várias remoções do índice 0).
     """
     TIPO = "tela_inicial_app_passageiro"
     _preparar_secao_anuncio_passageiro(driver)
@@ -2071,59 +2075,130 @@ def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
             return {"sucesso": False, "mensagem": "Parâmetro indice deve ser um inteiro >= 0."}
         if indice < 0:
             return {"sucesso": False, "mensagem": "Parâmetro indice deve ser um inteiro >= 0."}
-        try:
-            WebDriverWait(driver, 15).until(
-                lambda dr: dr.execute_script(
-                    """
-                    var TIPO = arguments[0], wantIdx = parseInt(arguments[1], 10);
-                    var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
-                    var rows = 0;
-                    var els = document.querySelectorAll('[id]');
-                    for (var i = 0; i < els.length; i++) {
-                        if (els[i].id.match(rowRe)) rows++;
-                    }
-                    return rows > wantIdx;
-                    """,
-                    TIPO,
-                    indice,
-                )
+
+        em_docker = os.environ.get("DOCKER", "").lower() in ("1", "true", "yes")
+        wait_rm = 35 if em_docker else 18
+
+        def _painel_pronto_para_indice(dr, tipo=TIPO, idx=indice):
+            """Pronto se existir linha DOM com sufixo idx OU houver linhas suficientes na ordenação."""
+            return dr.execute_script(
+                """
+                var TIPO = arguments[0], idx = parseInt(arguments[1], 10);
+                var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
+                var rows = [];
+                document.querySelectorAll('[id]').forEach(function(elsi) {
+                    var mm = elsi.id.match(rowRe);
+                    if (mm) rows.push(parseInt(mm[1], 10));
+                });
+                rows.sort(function(a, b) { return a - b; });
+                if (document.getElementById('anuncio-' + TIPO + '-' + idx)) return true;
+                return rows.length > idx;
+                """,
+                tipo,
+                idx,
             )
+
+        indice_pedido = indice
+        try:
+            WebDriverWait(driver, wait_rm).until(lambda d: _painel_pronto_para_indice(d, TIPO, indice_pedido))
         except TimeoutException:
+            if indice_pedido != 0:
+                log.warning(
+                    "Remover passageiro: painel não ficou pronto para índice %s; tentando fallback índice 0.",
+                    indice_pedido,
+                )
+                try:
+                    WebDriverWait(driver, wait_rm).until(lambda d: _painel_pronto_para_indice(d, TIPO, 0))
+                    indice = 0
+                except TimeoutException:
+                    return {
+                        "sucesso": False,
+                        "mensagem": (
+                            f"Painel de anúncios passageiro não carregou para índice {indice_pedido} "
+                            f"(nem fallback 0). Confirme Recursos premium e anúncios ativos."
+                        ),
+                    }
+            else:
+                return {
+                    "sucesso": False,
+                    "mensagem": (
+                        f"Painel de anúncios passageiro não carregou para o índice {indice_pedido}."
+                    ),
+                }
+
+        # Resolve sufixo DOM real (ord) para delete2-foto-…-ord / deletarAnuncio(ord, TIPO)
+        ord_remover = driver.execute_script(
+            """
+            var TIPO = arguments[0], idx = parseInt(arguments[1], 10);
+            var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
+            var rows = [];
+            document.querySelectorAll('[id]').forEach(function(elsi) {
+                var mm = elsi.id.match(rowRe);
+                if (mm) rows.push({el: elsi, ord: parseInt(mm[1], 10)});
+            });
+            rows.sort(function(a, b) { return a.ord - b.ord; });
+            if (document.getElementById('anuncio-' + TIPO + '-' + idx)) return idx;
+            if (idx >= 0 && idx < rows.length) return rows[idx].ord;
+            return null;
+            """,
+            TIPO,
+            indice,
+        )
+        if ord_remover is None and indice_pedido != 0:
+            ord_remover = driver.execute_script(
+                """
+                var TIPO = arguments[0], idx = parseInt(arguments[1], 10);
+                var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
+                var rows = [];
+                document.querySelectorAll('[id]').forEach(function(elsi) {
+                    var mm = elsi.id.match(rowRe);
+                    if (mm) rows.push({el: elsi, ord: parseInt(mm[1], 10)});
+                });
+                rows.sort(function(a, b) { return a.ord - b.ord; });
+                if (document.getElementById('anuncio-' + TIPO + '-' + idx)) return idx;
+                if (idx >= 0 && idx < rows.length) return rows[idx].ord;
+                return null;
+                """,
+                TIPO,
+                0,
+            )
+            if ord_remover is not None:
+                log.info("Remover passageiro: mapeamento fallback ord=%s após índice API %s.", ord_remover, indice_pedido)
+        if ord_remover is None:
             return {
                 "sucesso": False,
                 "mensagem": (
-                    f"Ainda não há anúncios de passageiro suficientes no painel para o índice {indice} "
-                    f"(é necessário pelo menos {indice + 1} anúncio na ordem exibida)."
+                    f"Não foi possível mapear o índice {indice_pedido} para uma linha de anúncio no painel."
                 ),
             }
+
+        log.info(
+            "Remover passageiro: índice pedido=%s → sufixo DOM ord=%s (slot Machine ou posição na lista).",
+            indice_pedido,
+            ord_remover,
+        )
+
         # Não acionar .click() dentro do mesmo execute_script: confirm() síncrono do painel
         # pode impedir o retorno (Selenium recebe None e trata como falha).
         delete_el_id = driver.execute_script(
             """
             try {
-            var TIPO = arguments[0], wantIdx = parseInt(arguments[1], 10);
-            var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
-            var rows = [];
-            var els = document.querySelectorAll('[id]');
-            for (var i = 0; i < els.length; i++) {
-                var elid = els[i].id;
-                var m = elid.match(rowRe);
-                if (m) rows.push({el: els[i], ord: parseInt(m[1], 10)});
-            }
-            rows.sort(function(a, b) { return a.ord - b.ord; });
-            if (wantIdx < 0 || wantIdx >= rows.length) return null;
-            var n = String(rows[wantIdx].ord);
+            var TIPO = arguments[0], ord = parseInt(arguments[1], 10);
+            var n = String(ord);
             var d2 = 'delete2-foto-anuncio-' + TIPO + '-' + n;
             var d1 = 'delete-foto-anuncio-' + TIPO + '-' + n;
             if (document.getElementById(d2)) return d2;
             if (document.getElementById(d1)) return d1;
-            var row = rows[wantIdx].el;
-            var divRem = row.querySelector('.delete-foto-anuncio2, .delete-foto-anuncio');
-            return divRem && divRem.id ? divRem.id : null;
+            var row = document.getElementById('anuncio-' + TIPO + '-' + ord);
+            if (row) {
+                var divRem = row.querySelector('.delete-foto-anuncio2, .delete-foto-anuncio');
+                if (divRem && divRem.id) return divRem.id;
+            }
+            return null;
             } catch (e) { return '__jserr__:' + (e && e.message ? e.message : String(e)); }
             """,
             TIPO,
-            indice,
+            ord_remover,
         )
         clicou = False
         if isinstance(delete_el_id, str) and delete_el_id.startswith("__jserr__:"):
@@ -2140,21 +2215,23 @@ def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
                 clicou = True
             except Exception as ex:
                 log.warning(
-                    "Remover anúncio passageiro: não clicou em #%s (índice %s): %s",
+                    "Remover anúncio passageiro: não clicou em #%s (pedido=%s ord=%s): %s",
                     delete_el_id,
-                    indice,
+                    indice_pedido,
+                    ord_remover,
                     ex,
                 )
                 clicou = False
-        elif indice is not None:
+        else:
             log.warning(
-                "Remover anúncio passageiro: nenhum id delete-foto para índice %s (linhas ausentes ou fora do intervalo).",
-                indice,
+                "Remover anúncio passageiro: nenhum id delete-foto para ord=%s (pedido=%s).",
+                ord_remover,
+                indice_pedido,
             )
         if not clicou:
             clicou = driver.execute_script(
                 """
-                var TIPO = arguments[0], wantIdx = parseInt(arguments[1], 10);
+                var TIPO = arguments[0], ord = parseInt(arguments[1], 10);
                 function textRemover(el) {
                     var t = (el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
                     return t === 'remover' || t.indexOf('remover') === 0;
@@ -2166,8 +2243,12 @@ def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
                     if (mm) rows.push({el: elsi, ord: parseInt(mm[1], 10)});
                 });
                 rows.sort(function(a, b) { return a.ord - b.ord; });
-                var row = (wantIdx >= 0 && wantIdx < rows.length) ? rows[wantIdx].el : null;
-                if (!row) row = document.getElementById('anuncio-' + TIPO + '-' + wantIdx);
+                var row = document.getElementById('anuncio-' + TIPO + '-' + ord);
+                if (!row) {
+                    for (var ri = 0; ri < rows.length; ri++) {
+                        if (rows[ri].ord === ord) { row = rows[ri].el; break; }
+                    }
+                }
                 if (row) {
                     var cand = row.querySelectorAll('a, button, [role="button"]');
                     for (var j = 0; j < cand.length; j++) {
@@ -2180,15 +2261,21 @@ def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
                 }
                 var lista = document.getElementById('lista-anuncios-' + TIPO);
                 if (lista) {
-                    var remov = [];
-                    var allC = lista.querySelectorAll('a, button, [role="button"]');
-                    for (var k = 0; k < allC.length; k++) {
-                        if (textRemover(allC[k])) remov.push(allC[k]);
+                    var pos = -1;
+                    for (var rj = 0; rj < rows.length; rj++) {
+                        if (rows[rj].ord === ord) { pos = rj; break; }
                     }
-                    if (remov.length > wantIdx) {
-                        remov[wantIdx].scrollIntoView({block: 'center', behavior: 'instant'});
-                        remov[wantIdx].click();
-                        return true;
+                    if (pos >= 0) {
+                        var remov = [];
+                        var allC = lista.querySelectorAll('a, button, [role="button"]');
+                        for (var k = 0; k < allC.length; k++) {
+                            if (textRemover(allC[k])) remov.push(allC[k]);
+                        }
+                        if (remov.length > pos) {
+                            remov[pos].scrollIntoView({block: 'center', behavior: 'instant'});
+                            remov[pos].click();
+                            return true;
+                        }
                     }
                 }
                 var nodes = document.querySelectorAll('[onclick*="deletarAnuncio"], [onclick*="removerAnuncio"]');
@@ -2196,13 +2283,13 @@ def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
                     var oc = nodes[n].getAttribute('onclick') || '';
                     if (oc.indexOf(TIPO) === -1) continue;
                     var mDel = oc.match(/deletarAnuncio\\s*\\(\\s*(\\d+)\\s*,\\s*['\"]([^'\"]+)['\"]\\s*\\)/);
-                    if (mDel && mDel[2] === TIPO && parseInt(mDel[1], 10) === wantIdx) {
+                    if (mDel && mDel[2] === TIPO && parseInt(mDel[1], 10) === ord) {
                         nodes[n].scrollIntoView({block: 'center', behavior: 'instant'});
                         nodes[n].click();
                         return true;
                     }
                     var m2 = oc.match(/removerAnuncio\\s*\\(\\s*['\"]([^'\"]+)['\"]\\s*,\\s*(\\d+)\\s*\\)/);
-                    if (m2 && m2[1] === TIPO && parseInt(m2[2], 10) === wantIdx) {
+                    if (m2 && m2[1] === TIPO && parseInt(m2[2], 10) === ord) {
                         nodes[n].scrollIntoView({block: 'center', behavior: 'instant'});
                         nodes[n].click();
                         return true;
@@ -2210,27 +2297,27 @@ def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
                 }
                 if (typeof deletarAnuncio === 'function') {
                     try {
-                        deletarAnuncio(wantIdx, TIPO);
+                        deletarAnuncio(ord, TIPO);
                         return true;
                     } catch (e) {}
                 }
                 if (typeof removerAnuncio === 'function') {
                     try {
-                        removerAnuncio(TIPO, wantIdx);
+                        removerAnuncio(TIPO, ord);
                         return true;
                     } catch (e) {}
                 }
                 return false;
                 """,
                 TIPO,
-                indice,
+                ord_remover,
             )
         if not clicou:
             return {
                 "sucesso": False,
                 "mensagem": (
-                    f"Não foi encontrado o controle Remover para o anúncio de passageiro no índice {indice}. "
-                    "Confira se o índice existe (0 = primeiro anúncio)."
+                    f"Não foi encontrado o controle Remover para anúncio passageiro "
+                    f"(pedido API índice {indice_pedido}, sufixo DOM ord={ord_remover})."
                 ),
             }
         time.sleep(0.8)
@@ -2244,7 +2331,9 @@ def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
             return {"sucesso": False, "mensagem": f"Remoção acionada, mas falha ao salvar: {salvo['erro']}"}
         return {
             "sucesso": True,
-            "mensagem": f"Anúncio de passageiro no índice {indice} removido e alterações salvas.",
+            "mensagem": (
+                f"Anúncio passageiro removido e salvo (índice API={indice_pedido}, sufixo DOM ord={ord_remover})."
+            ),
         }
 
     # Remover todos: repetir remoção do índice 0 (primeiro da lista ordenada) até falhar.
