@@ -26,7 +26,7 @@ Endpoints:
 """
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, executar_remover_anuncio_motorista, executar_adicionar_anuncio_passageiro, executar_remover_anuncio_passageiro, carregar_chaves, obter_chave, gerar_codigo
 import logging
 import asyncio
@@ -68,6 +68,25 @@ class RemoverAnuncioInput(BaseModel):
     manter_aberto: bool = False
     # Só para /remover-anuncio-passageiro: 0 = primeiro anúncio, 1 = segundo, … Omita para remover todos.
     indice: Optional[int] = None
+
+    @field_validator("indice", mode="before")
+    @classmethod
+    def _coerce_indice(cls, v):
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("null", "none"):
+                return None
+            return int(s)
+        return v
+
+    @field_validator("headless", "manter_aberto", mode="before")
+    @classmethod
+    def _coerce_bool(cls, v):
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "sim", "on")
+        return v
 
 
 class AnuncioMotoristaInput(BaseModel):

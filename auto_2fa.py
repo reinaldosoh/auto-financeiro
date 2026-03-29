@@ -1932,31 +1932,148 @@ def remover_anuncio_passageiro(driver, indice: int = None) -> dict:
             return {"sucesso": False, "mensagem": "Parâmetro indice deve ser um inteiro >= 0."}
         if indice < 0:
             return {"sucesso": False, "mensagem": "Parâmetro indice deve ser um inteiro >= 0."}
-        clicou = driver.execute_script(
+        try:
+            WebDriverWait(driver, 15).until(
+                lambda dr: dr.execute_script(
+                    """
+                    var TIPO = arguments[0], wantIdx = parseInt(arguments[1], 10);
+                    var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
+                    var rows = 0;
+                    var els = document.querySelectorAll('[id]');
+                    for (var i = 0; i < els.length; i++) {
+                        if (els[i].id.match(rowRe)) rows++;
+                    }
+                    return rows > wantIdx;
+                    """,
+                    TIPO,
+                    indice,
+                )
+            )
+        except TimeoutException:
+            return {
+                "sucesso": False,
+                "mensagem": (
+                    f"Ainda não há anúncios de passageiro suficientes no painel para o índice {indice} "
+                    f"(é necessário pelo menos {indice + 1} anúncio na ordem exibida)."
+                ),
+            }
+        # Não acionar .click() dentro do mesmo execute_script: confirm() síncrono do painel
+        # pode impedir o retorno (Selenium recebe None e trata como falha).
+        delete_el_id = driver.execute_script(
             """
+            try {
             var TIPO = arguments[0], wantIdx = parseInt(arguments[1], 10);
-            var nodes = document.querySelectorAll('a[onclick*="removerAnuncio"], button[onclick*="removerAnuncio"], [onclick*="removerAnuncio"]');
-            for (var i = 0; i < nodes.length; i++) {
-                var oc = nodes[i].getAttribute('onclick') || '';
-                if (oc.indexOf(TIPO) === -1 || oc.indexOf('removerAnuncio') === -1) continue;
-                var m = oc.match(/removerAnuncio\\s*\\(\\s*['\"]([^'\"]+)['\"]\\s*,\\s*(\\d+)\\s*\\)/);
-                if (m && m[1] === TIPO && parseInt(m[2], 10) === wantIdx) {
-                    nodes[i].scrollIntoView({block: 'center', behavior: 'instant'});
-                    nodes[i].click();
-                    return true;
-                }
+            var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
+            var rows = [];
+            var els = document.querySelectorAll('[id]');
+            for (var i = 0; i < els.length; i++) {
+                var elid = els[i].id;
+                var m = elid.match(rowRe);
+                if (m) rows.push({el: els[i], ord: parseInt(m[1], 10)});
             }
-            if (typeof removerAnuncio === 'function') {
-                try {
-                    removerAnuncio(TIPO, wantIdx);
-                    return true;
-                } catch (e) {}
-            }
-            return false;
+            rows.sort(function(a, b) { return a.ord - b.ord; });
+            if (wantIdx < 0 || wantIdx >= rows.length) return null;
+            var n = String(rows[wantIdx].ord);
+            var d2 = 'delete2-foto-anuncio-' + TIPO + '-' + n;
+            var d1 = 'delete-foto-anuncio-' + TIPO + '-' + n;
+            if (document.getElementById(d2)) return d2;
+            if (document.getElementById(d1)) return d1;
+            var row = rows[wantIdx].el;
+            var divRem = row.querySelector('.delete-foto-anuncio2, .delete-foto-anuncio');
+            return divRem && divRem.id ? divRem.id : null;
+            } catch (e) { return '__jserr__:' + (e && e.message ? e.message : String(e)); }
             """,
             TIPO,
             indice,
         )
+        clicou = False
+        if isinstance(delete_el_id, str) and delete_el_id.startswith("__jserr__:"):
+            log.warning("Remover anúncio passageiro (JS): %s", delete_el_id)
+            delete_el_id = None
+        if delete_el_id:
+            try:
+                del_btn = WebDriverWait(driver, 6).until(
+                    EC.presence_of_element_located((By.ID, delete_el_id))
+                )
+                driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'instant'});", del_btn)
+                time.sleep(0.12)
+                driver.execute_script("arguments[0].click();", del_btn)
+                clicou = True
+            except Exception as ex:
+                log.warning(
+                    "Remover anúncio passageiro: não clicou em #%s (índice %s): %s",
+                    delete_el_id,
+                    indice,
+                    ex,
+                )
+                clicou = False
+        elif indice is not None:
+            log.warning(
+                "Remover anúncio passageiro: nenhum id delete-foto para índice %s (linhas ausentes ou fora do intervalo).",
+                indice,
+            )
+        if not clicou:
+            clicou = driver.execute_script(
+                """
+                var TIPO = arguments[0], wantIdx = parseInt(arguments[1], 10);
+                function textRemover(el) {
+                    var t = (el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    return t === 'remover' || t.indexOf('remover') === 0;
+                }
+                var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
+                var rows = [];
+                document.querySelectorAll('[id]').forEach(function(elsi) {
+                    var mm = elsi.id.match(rowRe);
+                    if (mm) rows.push({el: elsi, ord: parseInt(mm[1], 10)});
+                });
+                rows.sort(function(a, b) { return a.ord - b.ord; });
+                var row = (wantIdx >= 0 && wantIdx < rows.length) ? rows[wantIdx].el : null;
+                if (!row) row = document.getElementById('anuncio-' + TIPO + '-' + wantIdx);
+                if (row) {
+                    var cand = row.querySelectorAll('a, button, [role="button"]');
+                    for (var j = 0; j < cand.length; j++) {
+                        if (textRemover(cand[j])) {
+                            cand[j].scrollIntoView({block: 'center', behavior: 'instant'});
+                            cand[j].click();
+                            return true;
+                        }
+                    }
+                }
+                var lista = document.getElementById('lista-anuncios-' + TIPO);
+                if (lista) {
+                    var remov = [];
+                    var allC = lista.querySelectorAll('a, button, [role="button"]');
+                    for (var k = 0; k < allC.length; k++) {
+                        if (textRemover(allC[k])) remov.push(allC[k]);
+                    }
+                    if (remov.length > wantIdx) {
+                        remov[wantIdx].scrollIntoView({block: 'center', behavior: 'instant'});
+                        remov[wantIdx].click();
+                        return true;
+                    }
+                }
+                var nodes = document.querySelectorAll('a[onclick*="removerAnuncio"], button[onclick*="removerAnuncio"], [onclick*="removerAnuncio"]');
+                for (var n = 0; n < nodes.length; n++) {
+                    var oc = nodes[n].getAttribute('onclick') || '';
+                    if (oc.indexOf(TIPO) === -1 || oc.indexOf('removerAnuncio') === -1) continue;
+                    var m2 = oc.match(/removerAnuncio\\s*\\(\\s*['\"]([^'\"]+)['\"]\\s*,\\s*(\\d+)\\s*\\)/);
+                    if (m2 && m2[1] === TIPO && parseInt(m2[2], 10) === wantIdx) {
+                        nodes[n].scrollIntoView({block: 'center', behavior: 'instant'});
+                        nodes[n].click();
+                        return true;
+                    }
+                }
+                if (typeof removerAnuncio === 'function') {
+                    try {
+                        removerAnuncio(TIPO, wantIdx);
+                        return true;
+                    } catch (e) {}
+                }
+                return false;
+                """,
+                TIPO,
+                indice,
+            )
         if not clicou:
             return {
                 "sucesso": False,
