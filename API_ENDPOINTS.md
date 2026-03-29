@@ -226,6 +226,8 @@ Corpo: **`AnuncioMotoristaInput`** com:
 - `imagem_url` ou `imagem_base64` obrigatório;
 - **`link_anuncio` obrigatório** (texto não vazio).
 
+Até **3** anúncios no painel: a automação preenche o **primeiro slot vazio** ou acrescenta uma linha com “+ novo” **sem** apagar os anúncios já existentes. Em `verificacao`, use **`dom_slot_idx`** para a remoção posterior.
+
 **Resposta 200:** `ResultadoOutput` (pode incluir `verificacao`).
 
 **Timeout recomendado:** 300–600 s.

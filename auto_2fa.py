@@ -1417,13 +1417,12 @@ def executar_remover_anuncio_motorista(email: str, senha: str, chave_secreta: st
 
 def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecionar_todas=True):
     """
-    Adiciona anúncio na seção do app passageiro (até 3 anúncios no painel).
+    Adiciona **mais um** anúncio na seção do app passageiro (até 3 no painel).
 
-    Mesma jornada base do motorista: Sim → ``add-foto-…-0`` → marca índice 0 excluído →
-    ``adicionarNovoAnuncio``. O **índice do novo slot** não é fixo: com vários anúncios o
-    painel acrescenta a linha no próximo índice (1, 2 ou 3). Detectamos pelo maior ``N`` em
-    ``add-foto-{FIELD_ID}-N`` após o incremento em relação ao estado antes de ``adicionarNovoAnuncio``.
-    Scroll inicial compensa o bloco passageiro abaixo do motorista (Docker/headless).
+    Diferente do motorista: **não** marca o índice 0 como excluído por padrão. Procura um slot
+    vazio (sem imagem/link ativos e não excluído); se não houver e ainda couber um terceiro,
+    chama ``adicionarNovoAnuncio`` sem apagar os existentes. O ``dom_slot_idx`` na verificação
+    reflete o sufixo real da linha usada (0, 1 ou 2).
     """
     log.info("Configurando anúncio na tela inicial do app passageiro")
     TIPO      = "tela_inicial_app_passageiro"
@@ -1490,14 +1489,18 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
             )
             driver.execute_script(f"alteraVisibilidadeCamposAnuncios('{TIPO}');")
 
-        def _passageiro_slot0_pronto(d, fid=FIELD_ID, tipo=TIPO):
-            """Com imagem já salva o painel esconde add-foto-0; a linha anuncio-TIPO-0 basta."""
+        def _passageiro_secao_pronta(d, fid=FIELD_ID, tipo=TIPO):
+            """Label do recurso + pelo menos uma linha anuncio-TIPO-N ou add-foto no slot 0."""
             return d.execute_script(
                 """
                 var fid = arguments[0], tipo = arguments[1];
-                if (document.getElementById('add-foto-' + fid + '-0')) return true;
-                if (document.getElementById('anuncio-' + tipo + '-0')) return true;
-                return false;
+                if (!document.getElementById('label-exibir-anuncio-' + tipo)) return false;
+                var rowRe = new RegExp('^anuncio-' + tipo + '-(\\\\d+)$');
+                var els = document.querySelectorAll('[id]');
+                for (var i = 0; i < els.length; i++) {
+                    if (els[i].id.match(rowRe)) return true;
+                }
+                return !!document.getElementById('add-foto-' + fid + '-0');
                 """,
                 fid,
                 tipo,
@@ -1518,22 +1521,15 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
         )
         time.sleep(0.35 if em_docker else 0.2)
 
-        slot0_ok = False
+        secao_ok = False
         for tent in range(3):
             try:
-                WebDriverWait(driver, wait_slot).until(_passageiro_slot0_pronto)
-                slot0_ok = True
-                tem_add = driver.execute_script(
-                    "return !!document.getElementById('add-foto-' + arguments[0] + '-0');",
-                    FIELD_ID,
-                )
-                log.info(
-                    "Passageiro: slot índice 0 pronto (add_foto=%s, linha anuncio ok).",
-                    tem_add,
-                )
+                WebDriverWait(driver, wait_slot).until(_passageiro_secao_pronta)
+                secao_ok = True
+                log.info("Passageiro: seção carregada (label + linha(s) ou add-foto-0).")
                 break
             except TimeoutException:
-                log.warning("Passageiro: timeout slot 0 (add-foto ou linha), reforço %s/3", tent + 1)
+                log.warning("Passageiro: timeout seção, reforço %s/3", tent + 1)
                 _scroll_passageiro_visivel()
                 time.sleep(0.45 if em_docker else 0.25)
                 _bootstrap_passageiro()
@@ -1548,61 +1544,135 @@ def adicionar_anuncio_passageiro(driver, imagem_path, link_anuncio=None, selecio
                 )
                 time.sleep(1.8 if em_docker else 0.9)
 
-        if not slot0_ok:
+        if not secao_ok:
             return {
                 "sucesso": False,
                 "mensagem": (
-                    "A seção de anúncio passageiro não carregou (linha índice 0 nem botão add-foto). "
+                    "A seção de anúncio passageiro não carregou. "
                     "Confirme 'Sim' no recurso e que o anúncio passageiro está habilitado na bandeira."
                 ),
             }
 
-        driver.execute_script(
+        MAX_PASS = 3
+        slot_info = driver.execute_script(
             """
-            var elExc = document.getElementById(arguments[0]);
-            if (elExc) {
-                elExc.value = '1';
-                if (window.jQuery) jQuery(elExc).val('1');
+            var TIPO = arguments[0], NOME_MOD = arguments[1], MAXA = parseInt(arguments[2], 10);
+            var rowRe = new RegExp('^anuncio-' + TIPO + '-(\\\\d+)$');
+            var ords = [];
+            document.querySelectorAll('[id]').forEach(function(elsi) {
+                var mm = elsi.id.match(rowRe);
+                if (mm) ords.push(parseInt(mm[1], 10));
+            });
+            ords.sort(function(a, b) { return a - b; });
+            var lista = typeof obterListaAnuncio === 'function' ? obterListaAnuncio(TIPO) : null;
+            for (var j = 0; j < ords.length; j++) {
+                var idx = ords[j];
+                var elExc = document.getElementById(NOME_MOD + '_' + idx + '_excluido');
+                var elImg = document.getElementById(NOME_MOD + '_' + idx + '_url_imagem');
+                var excl = elExc && String(elExc.value) === '1';
+                var vDom = elImg && elImg.value ? String(elImg.value).trim() : '';
+                var row = lista && lista[idx];
+                var vList = row && row.url_imagem ? String(row.url_imagem).trim() : '';
+                var uList = row && row.url_anuncio ? String(row.url_anuncio).trim() : '';
+                var ocupado = !excl && (vDom.length > 0 || vList.length > 0 || uList.length > 0);
+                if (!ocupado) return { modo: 'vazio', idx: idx, n_linhas: ords.length };
             }
+            if (ords.length >= MAXA) return { modo: 'limite', idx: -1, n_linhas: ords.length };
+            return { modo: 'novo', idx: -1, n_linhas: ords.length };
             """,
-            f"{NOME_MOD}_0_excluido",
+            TIPO,
+            NOME_MOD,
+            MAX_PASS,
         )
-        log.info("Passageiro: índice 0 marcado excluído (igual motorista).")
+        if not slot_info or not slot_info.get("modo"):
+            return {
+                "sucesso": False,
+                "mensagem": "Não foi possível analisar os slots de anúncio passageiro no painel.",
+            }
 
-        max_before = _max_add_foto_index(driver, FIELD_ID)
-        log.info("Passageiro: maior índice add-foto antes de adicionarNovoAnuncio: %s", max_before)
+        modo = slot_info["modo"]
+        log.info(
+            "Passageiro: escolha de slot modo=%s idx=%s (linhas DOM=%s)",
+            modo,
+            slot_info.get("idx"),
+            slot_info.get("n_linhas"),
+        )
 
-        driver.execute_script(f"adicionarNovoAnuncio('{TIPO}');")
-        time.sleep(0.65 if em_docker else 0.45)
-
-        try:
-            WebDriverWait(driver, wait_slot).until(
-                lambda d, fid=FIELD_ID, mb=max_before: _max_add_foto_index(d, fid) > mb
-            )
-        except TimeoutException:
+        if modo == "limite":
             return {
                 "sucesso": False,
                 "mensagem": (
-                    "Novo slot passageiro não apareceu após adicionarNovoAnuncio. "
-                    "Pode ser limite de 3 anúncios ativos ou falha do painel — remova um anúncio e tente de novo."
+                    "Limite de 3 anúncios passageiros no painel. Remova um anúncio para cadastrar outro."
                 ),
             }
 
-        NOVO_IDX = _max_add_foto_index(driver, FIELD_ID)
-        if NOVO_IDX < 0:
-            return {
-                "sucesso": False,
-                "mensagem": "Não foi possível determinar o índice do novo anúncio passageiro.",
-            }
+        if modo == "vazio":
+            NOVO_IDX = int(slot_info["idx"])
+            driver.execute_script(
+                """
+                var elExc = document.getElementById(arguments[0]);
+                if (elExc) {
+                    elExc.value = '0';
+                    if (window.jQuery) jQuery(elExc).val('0');
+                }
+                """,
+                f"{NOME_MOD}_{NOVO_IDX}_excluido",
+            )
+            driver.execute_script(
+                "var e=document.getElementById(arguments[0]); if(e) e.scrollIntoView({block:'center', behavior:'instant'});",
+                f"{FIELD_ID}-{NOVO_IDX}",
+            )
+            time.sleep(0.35 if em_docker else 0.2)
+            log.info("Passageiro: usando slot vazio existente idx=%s (sem excluir outros).", NOVO_IDX)
+            if not driver.execute_script(
+                "return !!document.getElementById('add-foto-' + arguments[0] + '-' + String(arguments[1]));",
+                FIELD_ID,
+                NOVO_IDX,
+            ):
+                log.warning(
+                    "add-foto ausente no slot vazio idx=%s; seguindo com upload XHR.",
+                    NOVO_IDX,
+                )
 
-        if not driver.execute_script(
-            "return !!document.getElementById('add-foto-' + arguments[0] + '-' + String(arguments[1]));",
-            FIELD_ID,
-            NOVO_IDX,
-        ):
-            log.warning("add-foto ausente no índice %s; seguindo (upload XHR não depende do botão).", NOVO_IDX)
+        else:
+            # novo: todos os slots com linha no DOM estão ocupados; painel ainda permite mais uma linha
+            max_before = _max_add_foto_index(driver, FIELD_ID)
+            log.info("Passageiro: maior índice add-foto antes de adicionarNovoAnuncio: %s", max_before)
 
-        log.info("Passageiro: novo slot detectado idx=%s (até 3 anúncios no painel).", NOVO_IDX)
+            driver.execute_script(f"adicionarNovoAnuncio('{TIPO}');")
+            time.sleep(0.65 if em_docker else 0.45)
+
+            try:
+                WebDriverWait(driver, wait_slot).until(
+                    lambda d, fid=FIELD_ID, mb=max_before: _max_add_foto_index(d, fid) > mb
+                )
+            except TimeoutException:
+                return {
+                    "sucesso": False,
+                    "mensagem": (
+                        "Novo slot passageiro não apareceu após adicionarNovoAnuncio. "
+                        "Limite de 3 anúncios ou erro no painel."
+                    ),
+                }
+
+            NOVO_IDX = _max_add_foto_index(driver, FIELD_ID)
+            if NOVO_IDX < 0:
+                return {
+                    "sucesso": False,
+                    "mensagem": "Não foi possível determinar o índice do novo anúncio passageiro.",
+                }
+
+            if not driver.execute_script(
+                "return !!document.getElementById('add-foto-' + arguments[0] + '-' + String(arguments[1]));",
+                FIELD_ID,
+                NOVO_IDX,
+            ):
+                log.warning(
+                    "add-foto ausente no índice %s; seguindo (upload XHR não depende do botão).",
+                    NOVO_IDX,
+                )
+
+            log.info("Passageiro: linha nova após adicionarNovoAnuncio, idx=%s.", NOVO_IDX)
 
         try:
             wait_link = 45 if em_docker else 25
