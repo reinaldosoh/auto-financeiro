@@ -40,6 +40,70 @@ DEFAULT_WEBHOOK = (
 )
 DADOS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dados_financeiro_completo.json")
 
+# Painel onde aparecem período (Mês passado) e Ganhos gerais — após login nem sempre estamos aqui.
+URLS_PAINEL_GANHOS = [
+    "https://cloud.taximachine.com.br/site/index",
+    "https://cloud.taximachine.com.br/",
+]
+
+
+def fechar_avisos_comuns(driver) -> None:
+    """Fecha modais que bloqueiam o painel (ex.: ciência, atenção)."""
+    from selenium.webdriver.common.by import By
+
+    xpaths = [
+        "//button[contains(., 'Estou ciente')]",
+        "//button[contains(., 'estou ciente')]",
+        "//a[contains(., 'Fechar') and contains(@class, 'close')]",
+        "//*[contains(@class,'modal')]//button[contains(., 'OK')]",
+    ]
+    for _ in range(3):
+        clicou = False
+        for xp in xpaths:
+            try:
+                for el in driver.find_elements(By.XPATH, xp):
+                    try:
+                        if el.is_displayed():
+                            driver.execute_script("arguments[0].click();", el)
+                            clicou = True
+                            time.sleep(0.4)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        if not clicou:
+            break
+
+
+def navegar_painel_ganhos_gerais(driver) -> bool:
+    """
+    Garante URL do painel com #periodo-select-button / ganhos gerais.
+    Sem isso, aplicar_filtro_mes_passado falha em silêncio (ex.: headless / redirect pós-2FA).
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    fechar_avisos_comuns(driver)
+    for url in URLS_PAINEL_GANHOS:
+        print(f"   🏠 Abrindo painel: {url}")
+        driver.get(url)
+        time.sleep(4)
+        fechar_avisos_comuns(driver)
+        try:
+            WebDriverWait(driver, 22).until(
+                EC.any_of(
+                    EC.presence_of_element_located((By.ID, "periodo-select-button")),
+                    EC.presence_of_element_located((By.ID, "ganho-geral-numero")),
+                )
+            )
+            print("   ✅ Painel com ganhos/período encontrado")
+            return True
+        except Exception:
+            continue
+    print("   ⚠️ Não achei periodo-select-button nem ganho-geral-numero em nenhuma URL candidata")
+    return False
+
 
 def enviar_json_webhook(url: str, payload: dict, timeout: int = 90) -> tuple:
     """POST JSON no webhook. Retorna (status_code, corpo_texto ou mensagem erro)."""
@@ -99,18 +163,21 @@ def fazer_login_completo(driver, email: str, senha: str) -> bool:
 def aplicar_filtro_mes_passado(driver):
     """Aplica filtro Mês passado."""
     from selenium.webdriver.common.by import By
-    
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
     print("\n📅 Aplicando filtro 'Mês passado'...")
-    
+
     try:
-        botao = driver.find_element(By.ID, "periodo-select-button")
+        wait = WebDriverWait(driver, 25)
+        botao = wait.until(EC.element_to_be_clickable((By.ID, "periodo-select-button")))
         driver.execute_script("arguments[0].click();", botao)
         time.sleep(2)
-        
-        opcao = driver.find_element(By.ID, "periodo-mes_passado")
+
+        opcao = wait.until(EC.element_to_be_clickable((By.ID, "periodo-mes_passado")))
         driver.execute_script("arguments[0].click();", opcao)
         print("   ✅ 'Mês passado' selecionado")
-        time.sleep(6)
+        time.sleep(8)
         return True
     except Exception as e:
         print(f"   ⚠️ Erro: {e}")
@@ -240,9 +307,9 @@ def extrair_taxas(driver):
 
     try:
         driver.get("https://cloud.taximachine.com.br/bandeira/creditos")
-        time.sleep(3)
+        time.sleep(5)
         try:
-            WebDriverWait(driver, 25).until(
+            WebDriverWait(driver, 45).until(
                 EC.any_of(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "button.short.btn-tax")),
                     EC.presence_of_element_located(
@@ -251,7 +318,11 @@ def extrair_taxas(driver):
                 )
             )
         except Exception:
-            time.sleep(4)
+            time.sleep(6)
+
+        src_l = (driver.page_source or "").lower()
+        if "login" in driver.current_url.lower() or "sessão foi encerrada" in src_l or "sessao foi encerrada" in src_l:
+            print("   ⚠️ Sessão parece inválida na página de créditos (login?)")
 
         botoes = driver.find_elements(By.CSS_SELECTOR, "button.short.btn-tax")
 
@@ -388,12 +459,39 @@ def executar_fluxo_financeiro_completo(
                 "chave_totp": "",
             }
 
+        fechar_avisos_comuns(driver)
+
+        avisos: Dict[str, Any] = {}
+
         print("\n" + "=" * 70)
         print("ETAPA 1: Ganhos gerais (Mês passado)")
         print("=" * 70)
 
-        if aplicar_filtro_mes_passado(driver):
-            dados["ganho_geral_mes_passado"] = extrair_ganhos_gerais(driver)
+        if navegar_painel_ganhos_gerais(driver):
+            avisos["painel_ganhos"] = "ok"
+        else:
+            avisos["painel_ganhos"] = "elementos_nao_encontrados"
+
+        filtro_ok = aplicar_filtro_mes_passado(driver)
+        avisos["filtro_mes_passado"] = "ok" if filtro_ok else "falhou"
+        if filtro_ok:
+            ganho = extrair_ganhos_gerais(driver)
+            if ganho:
+                dados["ganho_geral_mes_passado"] = ganho
+                avisos["ganhos_gerais"] = "ok"
+            else:
+                avisos["ganhos_gerais"] = "nao_extraido"
+        else:
+            # Ainda tenta ler o número exibido (período atual) para não voltar vazio em painel lento
+            ganho = extrair_ganhos_gerais(driver)
+            if ganho:
+                dados["ganho_geral_mes_passado"] = ganho
+                dados["ganho_geral_observacao"] = (
+                    "Valor lido sem confirmar filtro 'Mês passado' (filtro falhou ou período já era mês passado)."
+                )
+                avisos["ganhos_gerais"] = "lido_sem_filtro_confirmado"
+            else:
+                avisos["ganhos_gerais"] = "nao_extraido"
 
         print("\n" + "=" * 70)
         print("ETAPA 2: Taxas (Controle de créditos)")
@@ -401,9 +499,12 @@ def executar_fluxo_financeiro_completo(
 
         taxas = extrair_taxas(driver)
         dados.update(taxas)
+        avisos["taxas_chaves"] = list(taxas.keys()) if taxas else []
+        avisos["taxas_ok"] = bool(taxas)
 
         dados["data_extracao"] = datetime.now().isoformat()
         dados["email_conta_taximachine"] = email
+        dados["avisos_extracao"] = avisos
 
         payload_webhook = {
             "evento": "taximachine_financeiro_completo",
@@ -444,9 +545,22 @@ def executar_fluxo_financeiro_completo(
             except Exception:
                 pass
             print("\n✅ Encerrado (no_wait).")
+            tem_ganho = bool(dados.get("ganho_geral_mes_passado"))
+            tem_taxas = bool(avisos.get("taxas_ok"))
+            sucesso_real = tem_ganho or tem_taxas
+            msg = "Fluxo financeiro concluído."
+            if not sucesso_real:
+                msg = (
+                    "Login OK, mas não foram obtidos ganhos nem taxas. "
+                    "Verifique avisos_extracao nos dados e os logs do container (painel / créditos)."
+                )
+            elif not tem_ganho:
+                msg = "Parcial: taxas OK; ganhos gerais não extraídos."
+            elif not tem_taxas:
+                msg = "Parcial: ganhos OK; taxas não extraídas."
             return {
-                "sucesso": True,
-                "mensagem": "Fluxo financeiro concluído.",
+                "sucesso": sucesso_real,
+                "mensagem": msg,
                 "email": email,
                 "chave_totp": "",
                 "dados_extraidos": dados,
