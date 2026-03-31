@@ -23,4 +23,4 @@ jobs:
 
       - name: Importar módulos principais
         run: |
-          python -c "import api_server; import auto_2fa; print('imports OK')"
+          python -c "import api_server; import auto_2fa; import fluxo_financeiro_completo; import fluxo_historico_corridas_taxas; print('imports OK')"

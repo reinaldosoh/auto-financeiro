@@ -10,3 +10,7 @@ output*.log
 cascade_input*.txt
 cascade_input - cópia.txt
 chaves_totp.json
+# Saídas locais dos fluxos financeiros (não versionar)
+dados_financeiro.json
+dados_financeiro_completo.json
+dados_historico_corridas_taxas.json

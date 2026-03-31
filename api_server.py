@@ -33,7 +33,13 @@ Endpoints:
     POST /remover-anuncio
     POST /anuncio-passageiro
     POST /remover-anuncio-passageiro  (JSON opcional: indice inteiro 0-based; omitir = remover todos)
+    POST /financeiro_completo_02     - Fluxo financeiro (ganhos mês passado + taxas), JSON local;
+                                       default: sem webhook, navegador visível, mantém aberto em background.
+    POST /financeiro_historico_corridas - Histórico corridas (filtro mês anterior) + taxa central/seguro;
+                                          webhook de teste default; ver corpo FinanceiroHistoricoCorridasInput.
 """
+
+import threading
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr, field_validator
@@ -111,6 +117,41 @@ class AnuncioMotoristaInput(BaseModel):
     imagem_base64: str = None
     link_anuncio: str = ""
     selecionar_todas: bool = True
+
+
+class FinanceiroCompleto02Input(BaseModel):
+    """Dispara fluxo_financeiro_completo: extrai dados e grava dados_financeiro_completo.json."""
+
+    email: str
+    senha: str
+    headless: bool = False
+    manter_aberto: bool = True
+    enviar_webhook: bool = False
+
+    @field_validator("headless", "manter_aberto", "enviar_webhook", mode="before")
+    @classmethod
+    def _coerce_bool_fc02(cls, v):
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "sim", "on")
+        return v
+
+
+class FinanceiroHistoricoCorridasInput(BaseModel):
+    """Histórico de corridas (mês anterior) + taxas; grava dados_historico_corridas_taxas.json."""
+
+    email: str
+    senha: str
+    headless: bool = True
+    manter_aberto: bool = False
+    enviar_webhook: bool = True
+    webhook_url: Optional[str] = None
+
+    @field_validator("headless", "manter_aberto", "enviar_webhook", mode="before")
+    @classmethod
+    def _coerce_bool_hist(cls, v):
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "sim", "on")
+        return v
 
 
 class ResultadoOutput(BaseModel):
@@ -477,6 +518,138 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/financeiro_completo_02")
+async def financeiro_completo_02(inp: FinanceiroCompleto02Input):
+    """
+    Executa o fluxo financeiro completo (TaxiMachine): login + 2FA, filtro mês passado,
+    ganhos gerais, página de taxas/créditos. Grava `dados_financeiro_completo.json` no disco do servidor.
+
+    - Default: **não** envia webhook (`enviar_webhook=false`).
+    - Com `manter_aberto=true` (default): roda em **thread em segundo plano** e a API responde na hora
+      (o Chrome fica aberto no host até você fechar o processo ou a janela).
+    - Com `manter_aberto=false`: aguarda o fim do fluxo e devolve JSON com `dados_extraidos` na resposta
+      (encerra o navegador ao terminar).
+    """
+    from fluxo_financeiro_completo import DADOS_FILE, executar_fluxo_financeiro_completo
+
+    log.info(
+        "POST /financeiro_completo_02 email=%s headless=%s manter_aberto=%s webhook=%s",
+        inp.email,
+        inp.headless,
+        inp.manter_aberto,
+        inp.enviar_webhook,
+    )
+
+    if inp.manter_aberto:
+
+        def _run():
+            executar_fluxo_financeiro_completo(
+                inp.email,
+                inp.senha,
+                headless=inp.headless,
+                no_wait=False,
+                enviar_webhook=inp.enviar_webhook,
+            )
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {
+            "sucesso": True,
+            "mensagem": "Fluxo financeiro iniciado em segundo plano. Navegador permanece aberto no servidor.",
+            "email": inp.email,
+            "manter_aberto": True,
+            "enviar_webhook": inp.enviar_webhook,
+            "arquivo_json": os.path.basename(DADOS_FILE),
+            "endpoint": "/financeiro_completo_02",
+        }
+
+    loop = asyncio.get_event_loop()
+    resultado = await loop.run_in_executor(
+        executor,
+        lambda: executar_fluxo_financeiro_completo(
+            inp.email,
+            inp.senha,
+            headless=inp.headless,
+            no_wait=True,
+            enviar_webhook=inp.enviar_webhook,
+        ),
+    )
+
+    if not resultado:
+        raise HTTPException(
+            status_code=500,
+            detail={"sucesso": False, "mensagem": "Retorno vazio do fluxo financeiro."},
+        )
+    if not resultado.get("sucesso"):
+        raise HTTPException(status_code=400, detail=resultado)
+    return resultado
+
+
+@app.post("/financeiro_historico_corridas")
+async def financeiro_historico_corridas(inp: FinanceiroHistoricoCorridasInput):
+    """
+    Login (2FA/setup se preciso) → `historicoCorridas2` → painel **Filtro** → datas do **mês anterior**
+    (00:00–23:59) → **Filtrar** → aguarda → lê total `Exibindo 1-30 de N resultados` → `/bandeira/creditos`
+    → taxa central e taxa seguro app → JSON + webhook (URL padrão de teste ou `webhook_url`).
+    """
+    from fluxo_historico_corridas_taxas import (
+        DADOS_FILE as HISTORICO_DADOS_FILE,
+        executar_fluxo_historico_corridas_taxas,
+    )
+
+    log.info(
+        "POST /financeiro_historico_corridas email=%s headless=%s manter_aberto=%s webhook=%s",
+        inp.email,
+        inp.headless,
+        inp.manter_aberto,
+        inp.enviar_webhook,
+    )
+
+    if inp.manter_aberto:
+
+        def _run():
+            executar_fluxo_historico_corridas_taxas(
+                inp.email,
+                inp.senha,
+                headless=inp.headless,
+                no_wait=False,
+                enviar_webhook=inp.enviar_webhook,
+                webhook_url=inp.webhook_url,
+            )
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {
+            "sucesso": True,
+            "mensagem": "Fluxo histórico + taxas iniciado em segundo plano.",
+            "email": inp.email,
+            "manter_aberto": True,
+            "enviar_webhook": inp.enviar_webhook,
+            "arquivo_json": os.path.basename(HISTORICO_DADOS_FILE),
+            "endpoint": "/financeiro_historico_corridas",
+        }
+
+    loop = asyncio.get_event_loop()
+    resultado = await loop.run_in_executor(
+        executor,
+        lambda: executar_fluxo_historico_corridas_taxas(
+            inp.email,
+            inp.senha,
+            headless=inp.headless,
+            no_wait=True,
+            enviar_webhook=inp.enviar_webhook,
+            webhook_url=inp.webhook_url,
+        ),
+    )
+
+    if resultado is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"sucesso": False, "mensagem": "Retorno vazio do fluxo histórico."},
+        )
+    if not resultado.get("sucesso"):
+        raise HTTPException(status_code=400, detail=resultado)
+    return resultado
 
 
 if __name__ == "__main__":
