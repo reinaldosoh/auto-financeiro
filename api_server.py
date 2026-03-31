@@ -581,8 +581,7 @@ async def financeiro_completo_02(inp: FinanceiroCompleto02Input):
             status_code=500,
             detail={"sucesso": False, "mensagem": "Retorno vazio do fluxo financeiro."},
         )
-    if not resultado.get("sucesso"):
-        raise HTTPException(status_code=400, detail=resultado)
+    # HTTP 200 mesmo com sucesso=false — n8n e webhooks tratam pelo campo "sucesso" no JSON.
     return resultado
 
 
@@ -647,8 +646,6 @@ async def financeiro_historico_corridas(inp: FinanceiroHistoricoCorridasInput):
             status_code=500,
             detail={"sucesso": False, "mensagem": "Retorno vazio do fluxo histórico."},
         )
-    if not resultado.get("sucesso"):
-        raise HTTPException(status_code=400, detail=resultado)
     return resultado
 
 

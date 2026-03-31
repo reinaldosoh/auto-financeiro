@@ -40,11 +40,63 @@ DEFAULT_WEBHOOK = (
 )
 DADOS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dados_financeiro_completo.json")
 
-# Painel onde aparecem período (Mês passado) e Ganhos gerais — após login nem sempre estamos aqui.
+# Painel onde aparecem período (Mês passado) e Ganhos gerais — após 2FA o destino varia.
 URLS_PAINEL_GANHOS = [
-    "https://cloud.taximachine.com.br/site/index",
     "https://cloud.taximachine.com.br/",
+    "https://cloud.taximachine.com.br/site/index",
+    "https://cloud.taximachine.com.br/bandeira/index",
 ]
+
+
+def _html_tem_widgets_ganhos(driver) -> bool:
+    s = (driver.page_source or "").lower()
+    return (
+        "periodo-select-button" in s
+        or "ganho-geral-numero" in s
+        or "periodo-mes_passado" in s
+    )
+
+
+def _aguardar_widgets_painel(driver, segundos: float = 35) -> bool:
+    from selenium.webdriver.support.ui import WebDriverWait
+
+    try:
+        WebDriverWait(driver, segundos).until(lambda d: _html_tem_widgets_ganhos(d))
+        return True
+    except Exception:
+        return False
+
+
+def tentar_menu_painel_ou_inicio(driver) -> bool:
+    """Clica em link do menu que leva ao painel (SPA demora a injetar IDs)."""
+    from selenium.webdriver.common.by import By
+
+    xpaths = [
+        "//a[contains(@href,'site/index')]",
+        "//a[contains(@href,'/site/index')]",
+        "//nav//a[contains(normalize-space(.),'Painel')]",
+        "//a[contains(.,'Painel') and contains(@href,'http')]",
+        "//header//a[contains(@href,'index')]",
+    ]
+    for xp in xpaths:
+        try:
+            for a in driver.find_elements(By.XPATH, xp):
+                try:
+                    if not a.is_displayed():
+                        continue
+                    href = (a.get_attribute("href") or "").lower()
+                    if "logout" in href or "sair" in href:
+                        continue
+                    driver.execute_script("arguments[0].click();", a)
+                    time.sleep(5)
+                    fechar_avisos_comuns(driver)
+                    if _aguardar_widgets_painel(driver, 25):
+                        return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return False
 
 
 def fechar_avisos_comuns(driver) -> None:
@@ -77,31 +129,76 @@ def fechar_avisos_comuns(driver) -> None:
 
 def navegar_painel_ganhos_gerais(driver) -> bool:
     """
-    Garante URL do painel com #periodo-select-button / ganhos gerais.
-    Sem isso, aplicar_filtro_mes_passado falha em silêncio (ex.: headless / redirect pós-2FA).
+    Garante página com widgets de período / Ganhos gerais (IDs ou HTML).
+    Docker/SPA: espera na URL atual primeiro, depois tenta URLs e menu.
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
 
     fechar_avisos_comuns(driver)
-    for url in URLS_PAINEL_GANHOS:
-        print(f"   🏠 Abrindo painel: {url}")
-        driver.get(url)
-        time.sleep(4)
-        fechar_avisos_comuns(driver)
+    try:
+        print(f"   📍 URL após login: {driver.current_url}")
+    except Exception:
+        pass
+
+    # 1) Própria página pós-2FA (às vezes já é o painel; o React injeta os IDs depois)
+    try:
+        WebDriverWait(driver, 8).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+    except Exception:
+        pass
+    time.sleep(4)
+    fechar_avisos_comuns(driver)
+    if _aguardar_widgets_painel(driver, 28):
         try:
-            WebDriverWait(driver, 22).until(
+            WebDriverWait(driver, 12).until(
                 EC.any_of(
                     EC.presence_of_element_located((By.ID, "periodo-select-button")),
                     EC.presence_of_element_located((By.ID, "ganho-geral-numero")),
                 )
             )
-            print("   ✅ Painel com ganhos/período encontrado")
-            return True
         except Exception:
-            continue
-    print("   ⚠️ Não achei periodo-select-button nem ganho-geral-numero em nenhuma URL candidata")
+            pass
+        print("   ✅ Painel (widgets ganhos) na página atual")
+        return True
+
+    # 2) Menu “Painel” / link site/index
+    if tentar_menu_painel_ou_inicio(driver):
+        print("   ✅ Painel via menu/link")
+        return True
+
+    # 3) URLs candidatas + espera longa (SPA)
+    for url in URLS_PAINEL_GANHOS:
+        print(f"   🏠 Abrindo painel: {url}")
+        driver.get(url)
+        time.sleep(5)
+        try:
+            WebDriverWait(driver, 10).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+        except Exception:
+            pass
+        fechar_avisos_comuns(driver)
+        time.sleep(3)
+        if _aguardar_widgets_painel(driver, 35):
+            try:
+                WebDriverWait(driver, 15).until(
+                    EC.any_of(
+                        EC.presence_of_element_located((By.ID, "periodo-select-button")),
+                        EC.presence_of_element_located((By.ID, "ganho-geral-numero")),
+                    )
+                )
+            except Exception:
+                pass
+            print("   ✅ Painel encontrado após navegar")
+            return True
+        if tentar_menu_painel_ou_inicio(driver):
+            print("   ✅ Painel após menu (pós-GET)")
+            return True
+
+    print("   ⚠️ Não achei widgets de ganhos/período (HTML nem IDs)")
     return False
 
 
@@ -156,7 +253,9 @@ def fazer_login_completo(driver, email: str, senha: str) -> bool:
     elif cenario == "login_2fa":
         inserir_codigo_login_2fa(driver, chave)
 
-    time.sleep(2)
+    # Redirect + SPA pós-2FA (Docker costuma precisar de mais tempo que local)
+    time.sleep(8)
+    fechar_avisos_comuns(driver)
     return True
 
 
@@ -306,8 +405,12 @@ def extrair_taxas(driver):
     }
 
     try:
-        driver.get("https://cloud.taximachine.com.br/bandeira/creditos")
+        print("   🔗 Home antes de créditos (fixar sessão/cookies)…")
+        driver.get("https://cloud.taximachine.com.br/")
         time.sleep(5)
+        fechar_avisos_comuns(driver)
+        driver.get("https://cloud.taximachine.com.br/bandeira/creditos")
+        time.sleep(6)
         try:
             WebDriverWait(driver, 45).until(
                 EC.any_of(
@@ -321,8 +424,15 @@ def extrair_taxas(driver):
             time.sleep(6)
 
         src_l = (driver.page_source or "").lower()
-        if "login" in driver.current_url.lower() or "sessão foi encerrada" in src_l or "sessao foi encerrada" in src_l:
-            print("   ⚠️ Sessão parece inválida na página de créditos (login?)")
+        url_l = (driver.current_url or "").lower()
+        if (
+            "sessão foi encerrada" in src_l
+            or "sessao foi encerrada" in src_l
+            or "sua sessão foi encerrada" in src_l
+            or "/login" in url_l
+            or url_l.endswith("taximachine.com.br/login")
+        ):
+            print("   ⚠️ Sessão inválida ou tela de login em créditos")
 
         botoes = driver.find_elements(By.CSS_SELECTOR, "button.short.btn-tax")
 
@@ -462,6 +572,10 @@ def executar_fluxo_financeiro_completo(
         fechar_avisos_comuns(driver)
 
         avisos: Dict[str, Any] = {}
+        try:
+            avisos["url_pos_login"] = driver.current_url
+        except Exception:
+            avisos["url_pos_login"] = ""
 
         print("\n" + "=" * 70)
         print("ETAPA 1: Ganhos gerais (Mês passado)")
