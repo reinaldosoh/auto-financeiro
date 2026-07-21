@@ -36,8 +36,18 @@ Endpoints:
     POST /banner-corrida              - Campanha no ciclo da corrida (app passageiro)
     POST /remover-banner-corrida      - Remove/desativa campanha no ciclo da corrida
     POST /notificacao/login           - Login HTTP no painel (cookie de sessão, sem Selenium)
+    GET  /notificacao/bandeiras       - Centrais disponíveis na conta
     GET  /notificacao/categorias      - Categorias para filtros de notificação em massa
     POST /notificacao/categorias      - Mesmo que GET; aceita credenciais ou session_token
+    POST /notificacao/filtrar         - Gera relatório de destinatários (Avançar)
+    GET  /notificacao/status/{id}     - Polling do relatório assíncrono
+    GET  /notificacao/total/{id}      - Total de destinatários do relatório
+    POST /notificacao/aguardar        - Polling até relatório ficar pronto
+    POST /notificacao/enviar          - Enviar notificação agora
+    POST /notificacao/agendar         - Agendar notificação
+    POST /notificacao/autenticar-acao - 2FA para ação sensível (envio)
+    GET  /notificacao/listar          - Lista campanhas do painel
+    DELETE /notificacao/{id}          - Cancela/exclui campanha agendada
     POST /financeiro_completo_02     - Fluxo financeiro (ganhos mês passado + taxas), JSON local;
                                        default: sem webhook, navegador visível, mantém aberto em background.
     POST /financeiro_historico_corridas - Histórico corridas (filtro mês anterior) + taxa central/seguro;
@@ -50,10 +60,20 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr, field_validator
 from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, executar_remover_anuncio_motorista, executar_adicionar_anuncio_passageiro, executar_remover_anuncio_passageiro, executar_adicionar_campanha_corrida, executar_remover_campanha_corrida, carregar_chaves, obter_chave, gerar_codigo
 from machine_notificacao_http import (
+    aguardar_relatorio,
+    autenticar_acao_2fa,
+    cancelar_notificacao,
+    enviar_ou_agendar,
+    filtrar_destinatarios,
+    form_from_dict,
     get_session,
+    listar_notificacoes,
     login_painel,
+    obter_bandeiras,
     obter_categorias,
     obter_categorias_com_credenciais,
+    obter_total_destinatarios,
+    verificar_status_relatorio,
 )
 import logging
 import asyncio
@@ -63,7 +83,7 @@ import uuid
 import tempfile
 import os
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -209,6 +229,56 @@ class NotificacaoCategoriasInput(BaseModel):
     bandeira_id: Optional[str] = None
     codigo_2fa: Optional[str] = None
     chave_secreta: Optional[str] = None
+
+
+class NotificacaoSessionInput(BaseModel):
+    session_token: str
+
+
+class NotificacaoCampanhaInput(BaseModel):
+    session_token: str
+    titulo: Optional[str] = ""
+    mensagem: str
+    destinatario: str = "D"
+    bandeira_id: Optional[str] = None
+    periodo: str = "hoje"
+    quantidade_corridas_operacao: str = "N"
+    quantidade_corridas: Optional[str] = "0"
+    periodo_cadastro: str = "selecione"
+    data_inicial: Optional[str] = ""
+    data_final: Optional[str] = ""
+    data_inicial_cadastro: Optional[str] = ""
+    data_final_cadastro: Optional[str] = ""
+    categorias: Optional[List[str]] = None
+    generos: Optional[List[str]] = None
+    status_taxi: Optional[str] = ""
+    sistema_operacional_android: Optional[str] = "0"
+    sistema_operacional_ios: Optional[str] = "0"
+    cliente_id: Optional[str] = ""
+    codigo_2fa_acao: Optional[str] = None
+    chave_secreta: Optional[str] = None
+
+
+class NotificacaoAgendarInput(NotificacaoCampanhaInput):
+    data_envio: str
+    hora_envio: str
+
+
+class NotificacaoAguardarInput(BaseModel):
+    session_token: str
+    report_id: int
+    timeout_seg: int = 120
+
+
+class NotificacaoAutenticarAcaoInput(BaseModel):
+    session_token: str
+    codigo_2fa: Optional[str] = None
+    chave_secreta: Optional[str] = None
+
+
+class NotificacaoCancelarInput(BaseModel):
+    session_token: str
+    destinatario: str = "D"
 
 
 @app.post("/autenticar", response_model=ResultadoOutput)
@@ -710,6 +780,23 @@ def _notificacao_http_erro(exc: Exception) -> HTTPException:
     )
 
 
+def _require_session(token: str):
+    http = get_session(token)
+    if not http:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "sucesso": False,
+                "mensagem": "session_token inválido ou expirado. Faça login novamente.",
+            },
+        )
+    return http
+
+
+def _campanha_form(inp: NotificacaoCampanhaInput):
+    return form_from_dict(inp.model_dump())
+
+
 @app.post("/notificacao/login")
 async def notificacao_login_http(inp: NotificacaoLoginInput):
     """
@@ -815,6 +902,162 @@ async def notificacao_categorias_post(inp: NotificacaoCategoriasInput):
         raise
     except Exception as e:
         log.warning("Falha POST /notificacao/categorias: %s", e)
+        raise _notificacao_http_erro(e)
+
+
+@app.get("/notificacao/bandeiras")
+async def notificacao_bandeiras_get(session_token: str):
+    http = _require_session(session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        bandeiras = await loop.run_in_executor(executor, lambda: obter_bandeiras(http))
+        return {"sucesso": True, "bandeiras": bandeiras, "total": len(bandeiras)}
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/notificacao/filtrar")
+async def notificacao_filtrar(inp: NotificacaoCampanhaInput):
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: filtrar_destinatarios(http, _campanha_form(inp)),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.get("/notificacao/status/{report_id}")
+async def notificacao_status(report_id: int, session_token: str):
+    http = _require_session(session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: verificar_status_relatorio(http, report_id),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.get("/notificacao/total/{report_id}")
+async def notificacao_total(report_id: int, session_token: str):
+    http = _require_session(session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: obter_total_destinatarios(http, report_id),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/notificacao/aguardar")
+async def notificacao_aguardar(inp: NotificacaoAguardarInput):
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: aguardar_relatorio(
+                http, inp.report_id, timeout_seg=inp.timeout_seg
+            ),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/notificacao/enviar")
+async def notificacao_enviar(inp: NotificacaoCampanhaInput):
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: enviar_ou_agendar(
+                http,
+                _campanha_form(inp),
+                agendar=False,
+                codigo_2fa_acao=inp.codigo_2fa_acao,
+                chave_secreta=inp.chave_secreta,
+                gerar_codigo_fn=gerar_codigo,
+            ),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/notificacao/agendar")
+async def notificacao_agendar(inp: NotificacaoAgendarInput):
+    http = _require_session(inp.session_token)
+    form = _campanha_form(inp)
+    form.data_envio = inp.data_envio
+    form.hora_envio = inp.hora_envio
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: enviar_ou_agendar(
+                http,
+                form,
+                agendar=True,
+                codigo_2fa_acao=inp.codigo_2fa_acao,
+                chave_secreta=inp.chave_secreta,
+                gerar_codigo_fn=gerar_codigo,
+            ),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/notificacao/autenticar-acao")
+async def notificacao_autenticar_acao(inp: NotificacaoAutenticarAcaoInput):
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: autenticar_acao_2fa(
+                http,
+                codigo_2fa=inp.codigo_2fa,
+                chave_secreta=inp.chave_secreta,
+                gerar_codigo_fn=gerar_codigo,
+            ),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.get("/notificacao/listar")
+async def notificacao_listar(session_token: str, pagina: int = 1):
+    http = _require_session(session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: listar_notificacoes(http, pagina=pagina),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.delete("/notificacao/{notificacao_id}")
+async def notificacao_cancelar(
+    notificacao_id: int,
+    session_token: str,
+    destinatario: str = "D",
+):
+    http = _require_session(session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: cancelar_notificacao(http, notificacao_id, destinatario),
+        )
+    except Exception as e:
         raise _notificacao_http_erro(e)
 
 
