@@ -106,6 +106,83 @@ A API aceita strings para `indice`, `headless` e `manter_aberto` (ex.: N8N) e co
 | POST | `/remover-anuncio-passageiro` | Remove um (por `indice`) ou todos os anúncios passageiro |
 | POST | `/banner-corrida` | Campanha no ciclo da corrida (app passageiro) |
 | POST | `/remover-banner-corrida` | Remove/desativa campanha no ciclo da corrida |
+| POST | `/notificacao/login` | Login HTTP no painel (cookie, **sem Selenium**) |
+| GET | `/notificacao/categorias` | Categorias para filtros de notificação em massa |
+| POST | `/notificacao/categorias` | Igual ao GET; aceita credenciais ou `session_token` |
+
+---
+
+## Notificação em massa (HTTP direto — sem Selenium)
+
+Rotas que replicam o painel [`/notificacao/create`](https://cloud.taximachine.com.br/notificacao/create).  
+**Não** usam a API `integracao/v1/notificacao/push`.
+
+### `POST /notificacao/login`
+
+| Campo           | Obrigatório | Descrição |
+|-----------------|-------------|-----------|
+| `email`         | sim         | Login TaxiMachine |
+| `senha`         | sim         | Senha |
+| `codigo_2fa`    | não         | Código TOTP de 6 dígitos (contas com 2FA) |
+| `chave_secreta` | não         | Segredo TOTP; gera código automaticamente se omitir `codigo_2fa` |
+
+**Resposta de sucesso:**
+
+```json
+{
+  "sucesso": true,
+  "email": "Dinamica@mariana.com",
+  "session_token": "uuid...",
+  "phpsessid": "...",
+  "bandeiras": [{"id": "3085", "fuso_horario": "America/Sao_Paulo"}],
+  "mensagem": "Login HTTP no painel concluído."
+}
+```
+
+O `session_token` fica em memória no servidor por **~30 minutos**.
+
+### `GET /notificacao/categorias`
+
+Query params:
+
+| Param            | Obrigatório | Descrição |
+|------------------|-------------|-----------|
+| `session_token`  | sim         | Retornado por `/notificacao/login` |
+| `bandeira_id`    | não         | ID da central; omitir usa todas da conta |
+
+### `POST /notificacao/categorias`
+
+Use **`session_token`** **ou** **`email` + `senha`** (login automático).
+
+| Campo           | Obrigatório | Descrição |
+|-----------------|-------------|-----------|
+| `session_token` | condicional | Token de sessão |
+| `email`         | condicional | Com `senha`, se não enviar token |
+| `senha`         | condicional | Com `email` |
+| `bandeira_id`   | não         | ID da central |
+| `codigo_2fa`    | não         | Para contas com 2FA no login automático |
+| `chave_secreta` | não         | TOTP alternativo |
+
+**Exemplo — login + categorias:**
+
+```bash
+BASE="http://127.0.0.1:8000"
+
+TOKEN=$(curl -sS -X POST "$BASE/notificacao/login" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"Dinamica@mariana.com","senha":"SUA_SENHA"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['session_token'])")
+
+curl -sS "$BASE/notificacao/categorias?session_token=$TOKEN&bandeira_id=3085"
+```
+
+**Exemplo — categorias em uma chamada (email + senha):**
+
+```bash
+curl -sS -X POST "$BASE/notificacao/categorias" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"Dinamica@mariana.com","senha":"SUA_SENHA","bandeira_id":"3085"}'
+```
 
 ---
 

@@ -35,6 +35,9 @@ Endpoints:
     POST /remover-anuncio-passageiro  (JSON opcional: indice inteiro 0-based; omitir = remover todos)
     POST /banner-corrida              - Campanha no ciclo da corrida (app passageiro)
     POST /remover-banner-corrida      - Remove/desativa campanha no ciclo da corrida
+    POST /notificacao/login           - Login HTTP no painel (cookie de sessão, sem Selenium)
+    GET  /notificacao/categorias      - Categorias para filtros de notificação em massa
+    POST /notificacao/categorias      - Mesmo que GET; aceita credenciais ou session_token
     POST /financeiro_completo_02     - Fluxo financeiro (ganhos mês passado + taxas), JSON local;
                                        default: sem webhook, navegador visível, mantém aberto em background.
     POST /financeiro_historico_corridas - Histórico corridas (filtro mês anterior) + taxa central/seguro;
@@ -46,6 +49,12 @@ import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr, field_validator
 from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, executar_remover_anuncio_motorista, executar_adicionar_anuncio_passageiro, executar_remover_anuncio_passageiro, executar_adicionar_campanha_corrida, executar_remover_campanha_corrida, carregar_chaves, obter_chave, gerar_codigo
+from machine_notificacao_http import (
+    get_session,
+    login_painel,
+    obter_categorias,
+    obter_categorias_com_credenciais,
+)
 import logging
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -184,6 +193,22 @@ class ResultadoOutput(BaseModel):
     chave_totp: str
     mensagem: str
     verificacao: Optional[Dict[str, Any]] = None
+
+
+class NotificacaoLoginInput(BaseModel):
+    email: str
+    senha: str
+    codigo_2fa: Optional[str] = None
+    chave_secreta: Optional[str] = None
+
+
+class NotificacaoCategoriasInput(BaseModel):
+    session_token: Optional[str] = None
+    email: Optional[str] = None
+    senha: Optional[str] = None
+    bandeira_id: Optional[str] = None
+    codigo_2fa: Optional[str] = None
+    chave_secreta: Optional[str] = None
 
 
 @app.post("/autenticar", response_model=ResultadoOutput)
@@ -676,6 +701,121 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+def _notificacao_http_erro(exc: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={"sucesso": False, "mensagem": str(exc)},
+    )
+
+
+@app.post("/notificacao/login")
+async def notificacao_login_http(inp: NotificacaoLoginInput):
+    """
+    Login HTTP no painel TaxiMachine (sem Selenium).
+
+    Retorna `session_token` para usar em GET/POST /notificacao/categorias.
+    Sessão válida por ~30 minutos no servidor.
+    """
+    log.info("POST /notificacao/login email=%s", inp.email)
+    loop = asyncio.get_event_loop()
+    try:
+        resultado = await loop.run_in_executor(
+            executor,
+            lambda: login_painel(
+                email=inp.email,
+                senha=inp.senha,
+                codigo_2fa=inp.codigo_2fa,
+                chave_secreta=inp.chave_secreta,
+                gerar_codigo_fn=gerar_codigo,
+            ),
+        )
+        return resultado
+    except Exception as e:
+        log.warning("Falha /notificacao/login para %s: %s", inp.email, e)
+        raise _notificacao_http_erro(e)
+
+
+@app.get("/notificacao/categorias")
+async def notificacao_categorias_get(
+    session_token: str,
+    bandeira_id: Optional[str] = None,
+):
+    """
+    Lista categorias de motoristas para filtros de notificação em massa.
+
+    Use o `session_token` retornado por POST /notificacao/login.
+    """
+    log.info(
+        "GET /notificacao/categorias session_token=%s bandeira_id=%s",
+        session_token[:8] + "...",
+        bandeira_id,
+    )
+    http = get_session(session_token)
+    if not http:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "sucesso": False,
+                "mensagem": "session_token inválido ou expirado. Faça login novamente.",
+            },
+        )
+
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: obter_categorias(http, bandeira_id=bandeira_id),
+        )
+    except Exception as e:
+        log.warning("Falha GET /notificacao/categorias: %s", e)
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/notificacao/categorias")
+async def notificacao_categorias_post(inp: NotificacaoCategoriasInput):
+    """
+    Lista categorias usando `session_token` **ou** `email` + `senha` (login automático).
+    """
+    log.info(
+        "POST /notificacao/categorias session=%s email=%s bandeira_id=%s",
+        bool(inp.session_token),
+        inp.email,
+        inp.bandeira_id,
+    )
+    loop = asyncio.get_event_loop()
+    try:
+        if inp.session_token:
+            http = get_session(inp.session_token)
+            if not http:
+                raise RuntimeError("session_token inválido ou expirado. Faça login novamente.")
+            result = await loop.run_in_executor(
+                executor,
+                lambda: obter_categorias(http, bandeira_id=inp.bandeira_id),
+            )
+            result["session_token"] = inp.session_token
+            return result
+
+        if not inp.email or not inp.senha:
+            raise RuntimeError("Informe session_token ou email + senha.")
+
+        return await loop.run_in_executor(
+            executor,
+            lambda: obter_categorias_com_credenciais(
+                email=inp.email,
+                senha=inp.senha,
+                bandeira_id=inp.bandeira_id,
+                codigo_2fa=inp.codigo_2fa,
+                chave_secreta=inp.chave_secreta,
+                gerar_codigo_fn=gerar_codigo,
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Falha POST /notificacao/categorias: %s", e)
+        raise _notificacao_http_erro(e)
 
 
 @app.post("/financeiro_completo_02")
