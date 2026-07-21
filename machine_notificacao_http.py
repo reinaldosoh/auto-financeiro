@@ -514,13 +514,17 @@ def listar_notificacoes(
 
     itens: List[Dict[str, str]] = []
     for row in re.finditer(r"<tr class=\"(?:odd|even)\">(.*?)</tr>", r.text, re.S):
+        row_html = row.group(1)
         cells = re.findall(
             r'<td class="col col-([^"]+)">([^<]*)</td>',
-            row.group(1),
+            row_html,
         )
         if not cells:
             continue
         item = {k: v.strip() for k, v in cells}
+        id_match = re.search(r'data-id="(\d+)"', row_html)
+        if id_match:
+            item["id"] = id_match.group(1)
         itens.append(item)
 
     return {
