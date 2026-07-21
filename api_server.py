@@ -33,6 +33,8 @@ Endpoints:
     POST /remover-anuncio
     POST /anuncio-passageiro
     POST /remover-anuncio-passageiro  (JSON opcional: indice inteiro 0-based; omitir = remover todos)
+    POST /banner-corrida              - Campanha no ciclo da corrida (app passageiro)
+    POST /remover-banner-corrida      - Remove/desativa campanha no ciclo da corrida
     POST /financeiro_completo_02     - Fluxo financeiro (ganhos mês passado + taxas), JSON local;
                                        default: sem webhook, navegador visível, mantém aberto em background.
     POST /financeiro_historico_corridas - Histórico corridas (filtro mês anterior) + taxa central/seguro;
@@ -43,7 +45,7 @@ import threading
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr, field_validator
-from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, executar_remover_anuncio_motorista, executar_adicionar_anuncio_passageiro, executar_remover_anuncio_passageiro, carregar_chaves, obter_chave, gerar_codigo
+from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, executar_remover_anuncio_motorista, executar_adicionar_anuncio_passageiro, executar_remover_anuncio_passageiro, executar_adicionar_campanha_corrida, executar_remover_campanha_corrida, carregar_chaves, obter_chave, gerar_codigo
 import logging
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -117,6 +119,28 @@ class AnuncioMotoristaInput(BaseModel):
     imagem_base64: str = None
     link_anuncio: str = ""
     selecionar_todas: bool = True
+
+
+class BannerCorridaInput(BaseModel):
+    email: str
+    senha: str
+    chave_secreta: str = None
+    headless: bool = True
+    manter_aberto: bool = False
+    imagem_url: str = None
+    imagem_base64: str = None
+    link_campanha: str = ""
+    selecionar_todas: bool = True
+    limite_corridas: int = 1000
+    data_inicio: Optional[str] = None
+    data_fim: Optional[str] = None
+
+    @field_validator("headless", "manter_aberto", "selecionar_todas", mode="before")
+    @classmethod
+    def _coerce_bool_banner(cls, v):
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "sim", "on")
+        return v
 
 
 class FinanceiroCompleto02Input(BaseModel):
@@ -467,6 +491,140 @@ async def anuncio_passageiro(input_data: AnuncioMotoristaInput):
     finally:
         if os.path.exists(tmp_imagem_path):
             os.remove(tmp_imagem_path)
+
+
+@app.post("/banner-corrida", response_model=ResultadoOutput)
+async def banner_corrida(input_data: BannerCorridaInput):
+    """
+    Campanha no ciclo da corrida no app passageiro (Recursos Premium).
+    Preenche imagem, link opcional, centrais, limite de corridas e período, e clica em Gravar.
+    """
+    log.info("Requisição (banner-corrida) recebida para: %s", input_data.email)
+
+    if not input_data.imagem_url and not input_data.imagem_base64:
+        raise HTTPException(
+            status_code=400,
+            detail={"sucesso": False, "mensagem": "Você deve informar 'imagem_url' ou 'imagem_base64'."},
+        )
+
+    if input_data.limite_corridas <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"sucesso": False, "mensagem": "limite_corridas deve ser maior que zero."},
+        )
+
+    tmp_imagem_path = os.path.join(tempfile.gettempdir(), f"banner_corrida_{uuid.uuid4().hex}.png")
+
+    if input_data.imagem_base64:
+        try:
+            base64_data = input_data.imagem_base64
+            if "," in base64_data:
+                base64_data = base64_data.split(",")[1]
+            with open(tmp_imagem_path, "wb") as f:
+                f.write(base64.b64decode(base64_data))
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"sucesso": False, "mensagem": f"Erro ao decodificar imagem base64: {e}"},
+            )
+    elif input_data.imagem_url:
+        try:
+            import requests as req_lib
+
+            r = req_lib.get(
+                input_data.imagem_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=30,
+                verify=False,
+            )
+            r.raise_for_status()
+            with open(tmp_imagem_path, "wb") as out_file:
+                out_file.write(r.content)
+        except Exception as e:
+            if os.path.exists(tmp_imagem_path):
+                os.remove(tmp_imagem_path)
+            raise HTTPException(
+                status_code=400,
+                detail={"sucesso": False, "mensagem": f"Erro ao baixar imagem da URL: {e}"},
+            )
+
+    from functools import partial
+
+    loop = asyncio.get_event_loop()
+    func = partial(
+        executar_adicionar_campanha_corrida,
+        email=input_data.email,
+        senha=input_data.senha,
+        chave_secreta=input_data.chave_secreta,
+        headless=input_data.headless,
+        manter_aberto=input_data.manter_aberto,
+        imagem_path=tmp_imagem_path,
+        link_campanha=input_data.link_campanha,
+        selecionar_todas=input_data.selecionar_todas,
+        limite_corridas=input_data.limite_corridas,
+        data_inicio=input_data.data_inicio,
+        data_fim=input_data.data_fim,
+    )
+
+    try:
+        resultado = await loop.run_in_executor(executor, func)
+        if not resultado.get("sucesso", False):
+            raise HTTPException(status_code=400, detail=resultado)
+        if "chave_totp" not in resultado or resultado["chave_totp"] is None:
+            resultado["chave_totp"] = ""
+        return resultado
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Erro na thread /banner-corrida: %s", e)
+        raise HTTPException(
+            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+        )
+    finally:
+        if os.path.exists(tmp_imagem_path):
+            os.remove(tmp_imagem_path)
+
+
+@app.post("/remover-banner-corrida", response_model=ResultadoOutput)
+async def remover_banner_corrida_endpoint(creds: RemoverAnuncioInput):
+    """
+    Remove campanha no ciclo da corrida no app passageiro.
+    Omita `indice` para desativar o recurso (radio Não) e apagar todas as campanhas.
+    Com `indice`, remove só a campanha na posição informada (0-based).
+    """
+    log.info(
+        "Requisição (remover-banner-corrida) para: %s indice=%s",
+        creds.email,
+        creds.indice,
+    )
+
+    from functools import partial
+
+    loop = asyncio.get_event_loop()
+    func = partial(
+        executar_remover_campanha_corrida,
+        email=creds.email,
+        senha=creds.senha,
+        chave_secreta=creds.chave_secreta,
+        headless=creds.headless,
+        manter_aberto=creds.manter_aberto,
+        indice=creds.indice,
+    )
+
+    try:
+        resultado = await loop.run_in_executor(executor, func)
+        if "chave_totp" not in resultado or resultado["chave_totp"] is None:
+            resultado["chave_totp"] = ""
+        if not resultado.get("sucesso", False):
+            raise HTTPException(status_code=400, detail=resultado)
+        return resultado
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Erro na thread /remover-banner-corrida: %s", e)
+        raise HTTPException(
+            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+        )
 
 
 @app.post("/remover-anuncio-passageiro", response_model=ResultadoOutput)

@@ -2073,6 +2073,737 @@ def executar_adicionar_anuncio_passageiro(email: str, senha: str, chave_secreta:
             log.info("Navegador mantido aberto para %s.", email)
 
 
+def _preparar_secao_campanha_corrida(driver, sim: bool = True) -> None:
+    """Rola até a campanha no ciclo da corrida e ajusta o toggle Sim/Não."""
+    driver.execute_script(
+        """
+        var ids = ['label-exibir-campanha-app-pass', 'lista-campanhas', 'campanha-0'];
+        for (var i = 0; i < ids.length; i++) {
+            var e = document.getElementById(ids[i]);
+            if (e) e.scrollIntoView({block: 'center', behavior: 'instant'});
+        }
+        """,
+    )
+    time.sleep(0.35)
+    if sim:
+        driver.execute_script(
+            """
+            var simEl = document.getElementById('Campanha_exibir_campanha_0');
+            var naoEl = document.getElementById('Campanha_exibir_campanha_1');
+            if (simEl) simEl.checked = true;
+            if (naoEl) naoEl.checked = false;
+            if (typeof alteraVisibilidadeCamposCampanhas === 'function') alteraVisibilidadeCamposCampanhas();
+            if (typeof exibirRecursoPremiumCampanha === 'function') {
+                try { exibirRecursoPremiumCampanha(); } catch (e) {}
+            }
+            """,
+        )
+    else:
+        driver.execute_script(
+            """
+            var simEl = document.getElementById('Campanha_exibir_campanha_0');
+            var naoEl = document.getElementById('Campanha_exibir_campanha_1');
+            if (naoEl) naoEl.checked = true;
+            if (simEl) simEl.checked = false;
+            if (typeof apagarTodasCampanhas === 'function') apagarTodasCampanhas();
+            if (typeof alteraVisibilidadeCamposCampanhas === 'function') alteraVisibilidadeCamposCampanhas();
+            """,
+        )
+    time.sleep(0.45)
+
+
+def adicionar_campanha_corrida(
+    driver,
+    imagem_path,
+    link_campanha=None,
+    selecionar_todas=True,
+    limite_corridas=1000,
+    data_inicio=None,
+    data_fim=None,
+):
+    """
+    Preenche a campanha no ciclo da corrida (app passageiro).
+
+    Seção: «Adicionar campanha no ciclo da corrida no app passageiro».
+    Campos: imagem, link (opcional), centrais, limite de corridas e período.
+    """
+    from datetime import date, timedelta
+
+    log.info("Configurando campanha no ciclo da corrida (app passageiro)")
+    NOME_MOD = "Campanha"
+
+    if not data_inicio:
+        data_inicio = date.today().isoformat()
+    if not data_fim:
+        data_fim = (date.today() + timedelta(days=30)).isoformat()
+
+    try:
+        limite_str = str(int(limite_corridas))
+    except (TypeError, ValueError):
+        return {"sucesso": False, "mensagem": "limite_corridas deve ser um número inteiro positivo."}
+
+    link_limpo = (link_campanha or "").strip()
+    em_docker = os.environ.get("DOCKER", "").lower() in ("1", "true", "yes")
+    wait_secao = 45 if em_docker else 28
+
+    def _scroll_campanha():
+        driver.execute_script(
+            """
+            var ids = [
+                'label-exibir-campanha-app-pass',
+                'lista-campanhas',
+                'campanha-0'
+            ];
+            for (var i = 0; i < ids.length; i++) {
+                var e = document.getElementById(ids[i]);
+                if (e) e.scrollIntoView({block: 'center', behavior: 'instant'});
+            }
+            """,
+        )
+
+    def _bootstrap_campanha():
+        driver.execute_script(
+            """
+            var sim = document.getElementById('Campanha_exibir_campanha_0');
+            var nao = document.getElementById('Campanha_exibir_campanha_1');
+            if (sim) sim.checked = true;
+            if (nao) nao.checked = false;
+            if (typeof alteraVisibilidadeCamposCampanhas === 'function') {
+                alteraVisibilidadeCamposCampanhas();
+            }
+            if (typeof exibirRecursoPremiumCampanha === 'function') {
+                try { exibirRecursoPremiumCampanha(); } catch (e) {}
+            }
+            """,
+        )
+
+    def _secao_pronta(d):
+        return d.execute_script(
+            """
+            if (!document.getElementById('label-exibir-campanha-app-pass')) return false;
+            var sim = document.getElementById('Campanha_exibir_campanha_0');
+            if (!sim || !sim.checked) return false;
+            return !!document.getElementById('campanha-0')
+                || !!document.getElementById('add-foto-campanha-0');
+            """,
+        )
+
+    try:
+        _scroll_campanha()
+        time.sleep(0.55 if em_docker else 0.3)
+        _bootstrap_campanha()
+        time.sleep(0.45 if em_docker else 0.25)
+
+        secao_ok = False
+        for tent in range(3):
+            try:
+                WebDriverWait(driver, wait_secao).until(_secao_pronta)
+                secao_ok = True
+                log.info("Campanha corrida: seção carregada (Sim + campanha-0).")
+                break
+            except TimeoutException:
+                log.warning("Campanha corrida: timeout seção, reforço %s/3", tent + 1)
+                _scroll_campanha()
+                time.sleep(0.45 if em_docker else 0.25)
+                _bootstrap_campanha()
+                time.sleep(1.8 if em_docker else 0.9)
+
+        if not secao_ok:
+            return {
+                "sucesso": False,
+                "mensagem": (
+                    "A seção de campanha no ciclo da corrida não carregou. "
+                    "Confirme o recurso premium e role até o bloco da campanha."
+                ),
+            }
+
+        slot_info = driver.execute_script(
+            """
+            var NOME_MOD = arguments[0];
+            var idx = 0;
+            while (true) {
+                var row = document.getElementById('campanha-' + idx);
+                var addFoto = document.getElementById('add-foto-campanha-' + idx);
+                if (!row && !addFoto) break;
+                var elExc = document.getElementById(NOME_MOD + '_' + idx + '_excluido');
+                var elImg = document.getElementById(NOME_MOD + '_' + idx + '_url_imagem');
+                var excl = elExc && String(elExc.value) === '1';
+                var vDom = elImg && elImg.value ? String(elImg.value).trim() : '';
+                var rowList = typeof listaCampanhas !== 'undefined' ? listaCampanhas[idx] : null;
+                var vList = rowList && rowList.url_imagem ? String(rowList.url_imagem).trim() : '';
+                var ocupado = !excl && (vDom.length > 0 || vList.length > 0);
+                if (!ocupado) return {modo: 'vazio', idx: idx};
+                idx++;
+            }
+            return {modo: 'novo', idx: idx};
+            """,
+            NOME_MOD,
+        )
+        if not slot_info or slot_info.get("idx") is None:
+            return {"sucesso": False, "mensagem": "Não foi possível analisar o slot da campanha no painel."}
+
+        if slot_info.get("modo") == "novo" and slot_info.get("idx", 0) > 0:
+            driver.execute_script(
+                "if (typeof adicionarNovaCampanha === 'function') adicionarNovaCampanha();"
+            )
+            time.sleep(0.65 if em_docker else 0.45)
+
+        NOVO_IDX = int(slot_info.get("idx", 0))
+        driver.execute_script(
+            "var e=document.getElementById(arguments[0]); if(e) e.scrollIntoView({block:'center', behavior:'instant'});",
+            f"campanha-{NOVO_IDX}",
+        )
+        time.sleep(0.35 if em_docker else 0.2)
+
+        with open(imagem_path, "rb") as fh:
+            img_b64 = base64.b64encode(fh.read()).decode("utf-8")
+
+        bandeira_id = driver.execute_script(
+            "return typeof bandeiraId !== 'undefined' ? bandeiraId : null;"
+        )
+        log.info("Campanha corrida: upload XHR (bandeiraId=%s, idx=%s)...", bandeira_id, NOVO_IDX)
+
+        driver.set_script_timeout(30)
+        upload_result = driver.execute_async_script(
+            """
+            var callback = arguments[arguments.length - 1];
+            var b64 = arguments[0];
+            var bId = arguments[1];
+            var idx = arguments[2];
+            var byteStr = atob(b64);
+            var ab = new ArrayBuffer(byteStr.length);
+            var ia = new Uint8Array(ab);
+            for (var i = 0; i < byteStr.length; i++) ia[i] = byteStr.charCodeAt(i);
+            var blob = new Blob([ab], {type: 'image/jpeg'});
+            var file = new File([blob], 'banner_corrida.jpeg', {type: 'image/jpeg'});
+            var fd = new FormData();
+            fd.append('foto', file);
+            fd.append('id', String(bId));
+            fd.append('tipo', 'campanha');
+            fd.append('campo', 'campanha');
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', (typeof baseUrl !== 'undefined' ? baseUrl : '') + '/bandeira/salvarImagemConfiguracao');
+            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+            xhr.onload = function() {
+                try {
+                    var r = JSON.parse(xhr.responseText.trim());
+                    if (r.success !== true) {
+                        callback({success: false, error: r.errors ? r.errors[0] : 'upload falhou'});
+                        return;
+                    }
+                    var urlS3 = r.urlS3;
+                    var fn = r.fotoName || 'banner_corrida.jpeg';
+                    $('#preview-img-campanha-' + idx).attr('src', urlS3);
+                    $('#preview-label-campanha-' + idx).text(fn);
+                    document.getElementById('preview-campanha-' + idx).style.display = 'flex';
+                    document.getElementById('add-foto-campanha-' + idx).style.display = 'none';
+                    $('#Campanha_' + idx + '_url_imagem').val(urlS3).trigger('change');
+                    if (typeof listaCampanhas !== 'undefined' && listaCampanhas[idx]) {
+                        listaCampanhas[idx].url_imagem = urlS3;
+                        listaCampanhas[idx].label_nome_imagem = fn;
+                    }
+                    callback({success: true, urlS3: urlS3, fotoName: fn});
+                } catch(e) {
+                    callback({success: false, error: 'parse: ' + String(e)});
+                }
+            };
+            xhr.onerror = function() { callback({success: false, error: 'network error'}); };
+            xhr.send(fd);
+            """,
+            img_b64,
+            bandeira_id,
+            NOVO_IDX,
+        )
+
+        if not upload_result or not upload_result.get("success"):
+            err = (upload_result or {}).get("error", "timeout/desconhecido")
+            return {"sucesso": False, "mensagem": f"Falha no upload da imagem da campanha: {err}"}
+
+        url_s3 = upload_result["urlS3"]
+        foto_name = upload_result.get("fotoName", "banner_corrida.jpeg")
+        log.info("Campanha corrida: upload OK (%s)", url_s3)
+
+        ok_campos = driver.execute_script(
+            """
+            function nativeInputValue(el, val) {
+                if (!el) return;
+                try {
+                    var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                    if (desc && desc.set) desc.set.call(el, val);
+                    else el.value = val;
+                } catch (e) { el.value = val; }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            var idx = arguments[0], nm = arguments[1], link = arguments[2], limite = arguments[3],
+                dataIni = arguments[4], dataFim = arguments[5], selecionarTodas = arguments[6];
+            var elUrl = document.getElementById(nm + '_' + idx + '_url_campanha');
+            if (elUrl) {
+                elUrl.removeAttribute('disabled');
+                elUrl.removeAttribute('readonly');
+                nativeInputValue(elUrl, link);
+                if (window.jQuery) jQuery(elUrl).val(link).trigger('input').trigger('change');
+            }
+            if (typeof listaCampanhas !== 'undefined' && listaCampanhas[idx]) {
+                listaCampanhas[idx].url_campanha = link;
+            }
+
+            var selId = 'filtro_bandeiras_campanha_' + idx;
+            var sel = document.getElementById(selId);
+            var nBandeiras = 0;
+            if (sel && selecionarTodas) {
+                for (var i = 0; i < sel.options.length; i++) sel.options[i].selected = true;
+                if (window.jQuery) {
+                    var $s = jQuery(sel);
+                    try { $s.multiselect('selectAll', false); } catch (e1) {}
+                    try { $s.multiselect('refresh'); $s.trigger('change'); } catch (e2) {}
+                    var wrapper = sel.nextElementSibling;
+                    if (wrapper) {
+                        var allCheck = wrapper.querySelector('input[value="multiselect-all"]');
+                        if (allCheck && !allCheck.checked) allCheck.click();
+                    }
+                }
+                nBandeiras = sel.selectedOptions ? sel.selectedOptions.length : 0;
+                if (typeof listaCampanhas !== 'undefined' && listaCampanhas[idx]) {
+                    listaCampanhas[idx].bandeiras = Array.from(sel.selectedOptions).map(function(o){ return o.value; });
+                }
+            }
+
+            var elLim = document.getElementById(nm + '_' + idx + '_limite_solicitacoes_finalizadas');
+            if (elLim) {
+                nativeInputValue(elLim, limite);
+                if (window.jQuery) jQuery(elLim).val(limite).trigger('input');
+            }
+            if (typeof listaCampanhas !== 'undefined' && listaCampanhas[idx]) {
+                listaCampanhas[idx].limite_solicitacoes_finalizadas = limite;
+            }
+
+            $('#Campanha_' + idx + '_data_hora_inicio').val(dataIni);
+            $('#Campanha_' + idx + '_data_hora_fim').val(dataFim);
+            if (typeof listaCampanhas !== 'undefined' && listaCampanhas[idx]) {
+                listaCampanhas[idx].data_hora_inicio = dataIni;
+                listaCampanhas[idx].data_hora_fim = dataFim;
+            }
+            var dr = $('#picker-campanha-' + idx).data('daterangepicker');
+            if (dr && typeof moment !== 'undefined') {
+                dr.setStartDate(moment(dataIni));
+                dr.setEndDate(moment(dataFim));
+            }
+            if (typeof moment !== 'undefined') {
+                $('#btn-periodo-campanha-' + idx + ' .multiselect-selected-text').text(
+                    moment(dataIni).format('DD/MM/YYYY') + ' - ' + moment(dataFim).format('DD/MM/YYYY')
+                );
+            }
+            if (typeof copiarDadosCampanhas === 'function') copiarDadosCampanhas();
+
+            return {
+                url_imagem: document.getElementById(nm + '_' + idx + '_url_imagem') ? String(document.getElementById(nm + '_' + idx + '_url_imagem').value || '') : '',
+                url_campanha: elUrl ? String(elUrl.value || '') : '',
+                limite: elLim ? String(elLim.value || '') : '',
+                data_inicio: document.getElementById(nm + '_' + idx + '_data_hora_inicio') ? String(document.getElementById(nm + '_' + idx + '_data_hora_inicio').value || '') : '',
+                data_fim: document.getElementById(nm + '_' + idx + '_data_hora_fim') ? String(document.getElementById(nm + '_' + idx + '_data_hora_fim').value || '') : '',
+                bandeiras: nBandeiras,
+                dom_idx: idx
+            };
+            """,
+            NOVO_IDX,
+            NOME_MOD,
+            link_limpo,
+            limite_str,
+            data_inicio,
+            data_fim,
+            selecionar_todas,
+        )
+
+        if not ok_campos or not (ok_campos.get("url_imagem") or "").strip():
+            return {
+                "sucesso": False,
+                "mensagem": "Campos da campanha preenchidos parcialmente; imagem não confirmada no DOM.",
+            }
+
+        verificacao = {"preenchimento": ok_campos, "salvo": False, "validado": False}
+
+        driver.execute_script(
+            "if (typeof copiarDadosCampanhas === 'function') copiarDadosCampanhas();"
+        )
+        log.info("Campanha corrida: clicando em Gravar...")
+        salvo = _salvar_alteracoes_bandeira(driver)
+        if not salvo["ok"]:
+            return {
+                "sucesso": False,
+                "mensagem": f"Campanha preenchida, mas falha ao gravar: {salvo['erro']}",
+                "verificacao": verificacao,
+            }
+
+        verificacao["salvo"] = True
+        log.info("Campanha corrida salva; verificando persistência…")
+        try:
+            driver.get("https://cloud.taximachine.com.br/bandeira/update")
+            time.sleep(3)
+            aba = WebDriverWait(driver, 8).until(
+                EC.presence_of_element_located((By.XPATH, '//a[normalize-space(text())="Recursos premium"]'))
+            )
+            driver.execute_script("arguments[0].click();", aba)
+            time.sleep(2)
+            _preparar_secao_campanha_corrida(driver, sim=True)
+            pos_save = driver.execute_script(
+                """
+                var idx = arguments[0];
+                var sim = document.getElementById('Campanha_exibir_campanha_0');
+                var img = document.getElementById('Campanha_' + idx + '_url_imagem');
+                var lista = typeof listaCampanhas !== 'undefined' ? listaCampanhas : null;
+                var urlDom = img ? String(img.value || '').trim() : '';
+                var ativos = [];
+                if (lista) {
+                    ativos = lista
+                        .filter(function(c) { return String(c.excluido) !== '1'; })
+                        .map(function(c) {
+                            return {
+                                url_imagem: c.url_imagem || '',
+                                url_campanha: c.url_campanha || '',
+                                limite_solicitacoes_finalizadas: c.limite_solicitacoes_finalizadas || ''
+                            };
+                        });
+                }
+                return {
+                    sim_ativo: sim ? !!sim.checked : false,
+                    url_imagem_dom: urlDom,
+                    dom_idx: idx,
+                    ativos: ativos
+                };
+                """,
+                NOVO_IDX,
+            )
+            verificacao["pos_save"] = pos_save
+            url_esperada = (ok_campos.get("url_imagem") or "").strip()
+            validado = bool(
+                pos_save
+                and pos_save.get("sim_ativo")
+                and (
+                    (pos_save.get("url_imagem_dom") or "").strip() == url_esperada
+                    or any(
+                        (a.get("url_imagem") or "").strip() == url_esperada
+                        for a in (pos_save.get("ativos") or [])
+                    )
+                )
+            )
+            verificacao["validado"] = validado
+        except Exception as ex_ver:
+            log.warning("Verificação pós-gravação campanha corrida falhou: %s", ex_ver)
+
+        if verificacao.get("validado"):
+            msg = "Campanha no ciclo da corrida criada, gravada e validada no painel."
+        else:
+            msg = "Campanha no ciclo da corrida gravada; validação automática não confirmou — confira no painel."
+        return {"sucesso": True, "mensagem": msg, "verificacao": verificacao}
+
+    except Exception as e:
+        log.exception("Erro ao adicionar campanha no ciclo da corrida")
+        return {"sucesso": False, "mensagem": f"Erro: {str(e)}"}
+
+
+def executar_adicionar_campanha_corrida(
+    email: str,
+    senha: str,
+    chave_secreta: str = None,
+    headless: bool = False,
+    imagem_path: str = "",
+    link_campanha: str = "",
+    selecionar_todas: bool = True,
+    limite_corridas: int = 1000,
+    data_inicio: str = None,
+    data_fim: str = None,
+    manter_aberto: bool = True,
+) -> dict:
+    """Login 2FA → Recursos Premium → campanha no ciclo da corrida (sempre grava ao final)."""
+    resultado = {"sucesso": False, "email": email, "chave_totp": chave_secreta or "", "mensagem": ""}
+    driver = None
+    try:
+        driver = criar_driver(headless)
+        if not fazer_login(driver, email, senha):
+            resultado["mensagem"] = "Falha no login inicial."
+            return resultado
+
+        time.sleep(3)
+        cenario = detectar_cenario_pos_login(driver)
+
+        if cenario in ("login_2fa", "setup_2fa"):
+            chave = chave_secreta or obter_chave(email)
+            if not chave:
+                resultado["mensagem"] = mensagem_totp_ausente(cenario)
+                return resultado
+            if not inserir_codigo_login_2fa(driver, chave):
+                resultado["mensagem"] = "Falha ao submeter código TOTP."
+                return resultado
+            resultado["chave_totp"] = chave
+            time.sleep(5)
+
+        if not navegar_recursos_premium(driver):
+            resultado["mensagem"] = "Falha ao navegar até Recursos Premium."
+            return resultado
+
+        time.sleep(3)
+
+        ret = adicionar_campanha_corrida(
+            driver,
+            imagem_path,
+            link_campanha,
+            selecionar_todas,
+            limite_corridas,
+            data_inicio,
+            data_fim,
+        )
+        resultado["sucesso"] = ret["sucesso"]
+        resultado["mensagem"] = ret["mensagem"]
+        if "verificacao" in ret:
+            resultado["verificacao"] = ret["verificacao"]
+        return resultado
+
+    except Exception as e:
+        log.exception("Erro inesperado na automação de campanha corrida")
+        resultado["mensagem"] = f"Erro inesperado: {str(e)}"
+        return resultado
+    finally:
+        if driver and not manter_aberto:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        elif driver and manter_aberto:
+            _drivers_abertos[email] = driver
+            log.info("Navegador mantido aberto para %s.", email)
+
+
+def remover_campanha_corrida(driver, indice: int = None) -> dict:
+    """
+    Remove campanha(s) no ciclo da corrida (app passageiro).
+
+    :param indice: Se informado, remove só a campanha nesse índice (0-based).
+        Se None, desativa o recurso (radio Não) e apaga todas as campanhas.
+    """
+    NOME_MOD = "Campanha"
+    em_docker = os.environ.get("DOCKER", "").lower() in ("1", "true", "yes")
+    wait_secao = 35 if em_docker else 18
+
+    def _campanha_ativa_no_painel(d, idx=0):
+        return d.execute_script(
+            """
+            var idx = parseInt(arguments[0], 10);
+            var sim = document.getElementById('Campanha_exibir_campanha_0');
+            if (!sim || !sim.checked) return false;
+            var row = document.getElementById('campanha-' + idx);
+            var img = document.getElementById('Campanha_' + idx + '_url_imagem');
+            var exc = document.getElementById('Campanha_' + idx + '_excluido');
+            if (row && exc && String(exc.value) !== '1') return true;
+            if (img && String(img.value || '').trim().length > 0) return true;
+            if (typeof listaCampanhas !== 'undefined') {
+                var c = listaCampanhas[idx];
+                if (c && String(c.excluido) !== '1' && (c.url_imagem || c.id)) return true;
+            }
+            return false;
+            """,
+            idx,
+        )
+
+    try:
+        _preparar_secao_campanha_corrida(driver, sim=True)
+        try:
+            WebDriverWait(driver, wait_secao).until(
+                lambda d: d.execute_script(
+                    "return !!document.getElementById('label-exibir-campanha-app-pass');"
+                )
+            )
+        except TimeoutException:
+            return {
+                "sucesso": False,
+                "mensagem": "Seção de campanha no ciclo da corrida não carregou no painel.",
+            }
+
+        if indice is None:
+            tinha_campanha = driver.execute_script(
+                """
+                var sim = document.getElementById('Campanha_exibir_campanha_0');
+                if (sim && sim.checked) return true;
+                if (typeof listaCampanhas !== 'undefined') {
+                    return listaCampanhas.some(function(c) {
+                        return String(c.excluido) !== '1' && (c.url_imagem || c.id);
+                    });
+                }
+                return false;
+                """,
+            )
+            if not tinha_campanha:
+                return {
+                    "sucesso": False,
+                    "mensagem": "Nenhuma campanha no ciclo da corrida ativa para remover.",
+                }
+
+            _preparar_secao_campanha_corrida(driver, sim=False)
+            time.sleep(0.6 if em_docker else 0.35)
+            salvo = _salvar_alteracoes_bandeira(driver)
+            if not salvo["ok"]:
+                return {
+                    "sucesso": False,
+                    "mensagem": f"Campanha desativada no formulário, mas falha ao gravar: {salvo['erro']}",
+                }
+            return {
+                "sucesso": True,
+                "mensagem": "Campanha no ciclo da corrida desativada (Não) e alterações gravadas.",
+            }
+
+        try:
+            indice = int(indice)
+        except (TypeError, ValueError):
+            return {"sucesso": False, "mensagem": "Parâmetro indice deve ser um inteiro >= 0."}
+        if indice < 0:
+            return {"sucesso": False, "mensagem": "Parâmetro indice deve ser um inteiro >= 0."}
+
+        try:
+            WebDriverWait(driver, wait_secao).until(lambda d: _campanha_ativa_no_painel(d, indice))
+        except TimeoutException:
+            return {
+                "sucesso": False,
+                "mensagem": f"Nenhuma campanha ativa encontrada no índice {indice}.",
+            }
+
+        delete_el_id = driver.execute_script(
+            """
+            var idx = parseInt(arguments[0], 10);
+            var ids = ['delete2-foto-campanha-' + idx, 'delete-foto-campanha-' + idx];
+            for (var i = 0; i < ids.length; i++) {
+                if (document.getElementById(ids[i])) return ids[i];
+            }
+            return null;
+            """,
+            indice,
+        )
+
+        clicou = False
+        if delete_el_id:
+            try:
+                del_btn = WebDriverWait(driver, 6).until(
+                    EC.presence_of_element_located((By.ID, delete_el_id))
+                )
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center', behavior:'instant'});", del_btn
+                )
+                time.sleep(0.12)
+                driver.execute_script("arguments[0].click();", del_btn)
+                clicou = True
+            except Exception as ex:
+                log.warning("Remover campanha corrida: falha ao clicar #%s: %s", delete_el_id, ex)
+
+        if not clicou:
+            clicou = driver.execute_script(
+                """
+                var idx = parseInt(arguments[0], 10);
+                var nm = arguments[1];
+                var elExc = document.getElementById(nm + '_' + idx + '_excluido');
+                var elAtivo = document.getElementById(nm + '_' + idx + '_ativo');
+                if (!elExc) return false;
+                elExc.value = '1';
+                if (elAtivo) elAtivo.value = '0';
+                if (typeof copiarDadosCampanhas === 'function') copiarDadosCampanhas();
+                var lista = typeof listaCampanhas !== 'undefined' ? listaCampanhas : null;
+                if (lista && lista[idx] && (lista[idx].id === undefined || lista[idx].id === null)) {
+                    lista.splice(idx, 1);
+                } else if (lista && lista[idx]) {
+                    lista[idx].excluido = '1';
+                    lista[idx].ativa = '0';
+                }
+                if (typeof exibirRecursoPremiumCampanha === 'function') exibirRecursoPremiumCampanha();
+                if (typeof verificarVisibilidadeCampanhas === 'function') verificarVisibilidadeCampanhas();
+                return true;
+                """,
+                indice,
+                NOME_MOD,
+            )
+
+        if not clicou:
+            return {
+                "sucesso": False,
+                "mensagem": f"Não foi possível remover a campanha no índice {indice}.",
+            }
+
+        time.sleep(0.8)
+        try:
+            driver.switch_to.alert.accept()
+        except Exception:
+            pass
+        time.sleep(0.8)
+
+        salvo = _salvar_alteracoes_bandeira(driver)
+        if not salvo["ok"]:
+            return {
+                "sucesso": False,
+                "mensagem": f"Remoção acionada, mas falha ao gravar: {salvo['erro']}",
+            }
+        return {
+            "sucesso": True,
+            "mensagem": f"Campanha no ciclo da corrida removida e gravada (índice {indice}).",
+        }
+
+    except Exception as e:
+        log.exception("Erro ao remover campanha no ciclo da corrida")
+        return {"sucesso": False, "mensagem": f"Erro: {str(e)}"}
+
+
+def executar_remover_campanha_corrida(
+    email: str,
+    senha: str,
+    chave_secreta: str = None,
+    headless: bool = False,
+    manter_aberto: bool = False,
+    indice: int = None,
+) -> dict:
+    """Login 2FA → Recursos Premium → remover campanha(s) no ciclo da corrida."""
+    resultado = {"sucesso": False, "email": email, "chave_totp": chave_secreta or "", "mensagem": ""}
+    driver = None
+    try:
+        driver = criar_driver(headless)
+        if not fazer_login(driver, email, senha):
+            resultado["mensagem"] = "Falha no login inicial."
+            return resultado
+
+        time.sleep(3)
+        cenario = detectar_cenario_pos_login(driver)
+
+        if cenario in ("login_2fa", "setup_2fa"):
+            chave = chave_secreta or obter_chave(email)
+            if not chave:
+                resultado["mensagem"] = mensagem_totp_ausente(cenario)
+                return resultado
+            if not inserir_codigo_login_2fa(driver, chave):
+                resultado["mensagem"] = "Falha ao submeter código TOTP."
+                return resultado
+            resultado["chave_totp"] = chave
+            time.sleep(5)
+
+        if not navegar_recursos_premium(driver):
+            resultado["mensagem"] = "Falha ao navegar até Recursos Premium."
+            return resultado
+
+        time.sleep(3)
+        ret = remover_campanha_corrida(driver, indice=indice)
+        resultado["sucesso"] = ret["sucesso"]
+        resultado["mensagem"] = ret["mensagem"]
+        return resultado
+
+    except Exception as e:
+        log.exception("Erro inesperado na remoção de campanha corrida")
+        resultado["mensagem"] = f"Erro inesperado: {str(e)}"
+        return resultado
+    finally:
+        if driver and not manter_aberto:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        elif driver and manter_aberto:
+            _drivers_abertos[email] = driver
+            log.info("Navegador mantido aberto para %s.", email)
+
+
 def _preparar_secao_anuncio_passageiro(driver) -> None:
     """Rola até a seção e garante radio Sim + campos visíveis."""
     TIPO = "tela_inicial_app_passageiro"

@@ -53,7 +53,26 @@ Em caso de falha de negócio, muitas rotas respondem **HTTP 400** com `detail` e
 
 É obrigatório informar **`imagem_url` ou `imagem_base64`** nas rotas de anúncio.
 
-### `RemoverAnuncioInput` (`/remover-anuncio` e `/remover-anuncio-passageiro`)
+### `BannerCorridaInput` (`/banner-corrida`)
+
+| Campo              | Obrigatório | Default   | Descrição                                      |
+|--------------------|-------------|-----------|------------------------------------------------|
+| `email`            | sim         | —         | Login                                          |
+| `senha`            | sim         | —         | Senha                                          |
+| `chave_secreta`    | não         | `null`    | TOTP; omitir se já salvo após `/autenticar`    |
+| `headless`         | não         | `true`    |                                                |
+| `manter_aberto`    | não         | `false`   |                                                |
+| `imagem_url`       | condicional | `null`    | URL pública da imagem (640×480, PNG/JPG)       |
+| `imagem_base64`    | condicional | `null`    | Imagem em Base64                               |
+| `link_campanha`    | não         | `""`      | URL opcional da campanha                       |
+| `selecionar_todas` | não         | `true`    | Seleciona todas as centrais no multiselect     |
+| `limite_corridas`  | não         | `1000`    | «Em quantas corridas mostrar a campanha?»      |
+| `data_inicio`      | não         | hoje      | `YYYY-MM-DD` (início do período)               |
+| `data_fim`         | não         | hoje+30d  | `YYYY-MM-DD` (fim do período)                  |
+
+É obrigatório informar **`imagem_url` ou `imagem_base64`**. A automação **sempre clica em Gravar** ao final.
+
+### `RemoverAnuncioInput` (`/remover-anuncio`, `/remover-anuncio-passageiro`, `/remover-banner-corrida`)
 
 | Campo            | Obrigatório | Default   | Descrição                                                |
 |------------------|-------------|-----------|----------------------------------------------------------|
@@ -85,6 +104,8 @@ A API aceita strings para `indice`, `headless` e `manter_aberto` (ex.: N8N) e co
 | POST | `/remover-anuncio` | Remove anúncio do motorista |
 | POST | `/anuncio-passageiro` | Cadastra anúncio (app passageiro) |
 | POST | `/remover-anuncio-passageiro` | Remove um (por `indice`) ou todos os anúncios passageiro |
+| POST | `/banner-corrida` | Campanha no ciclo da corrida (app passageiro) |
+| POST | `/remover-banner-corrida` | Remove/desativa campanha no ciclo da corrida |
 
 ---
 
@@ -229,6 +250,68 @@ Corpo: **`AnuncioMotoristaInput`** com:
 Até **3** anúncios no painel: a automação preenche o **primeiro slot vazio** ou acrescenta uma linha com “+ novo” **sem** apagar os anúncios já existentes. Em `verificacao`, use **`dom_slot_idx`** para a remoção posterior.
 
 **Resposta 200:** `ResultadoOutput` (pode incluir `verificacao`).
+
+**Timeout recomendado:** 300–600 s.
+
+---
+
+## POST `/banner-corrida`
+
+Corpo: **`BannerCorridaInput`**
+
+Recurso pago **«Adicionar campanha no ciclo da corrida no app passageiro»** (Recursos Premium). A automação:
+
+1. Marca **Sim** no toggle da campanha;
+2. Faz upload da imagem (`tipo=campanha`, endpoint `/bandeira/salvarImagemConfiguracao`);
+3. Preenche link (opcional), centrais, limite de corridas e período;
+4. Clica em **Gravar** e valida persistência após recarregar o painel.
+
+**Resposta 200:** `ResultadoOutput` (pode incluir `verificacao.preenchimento`, `verificacao.salvo`, `verificacao.validado`).
+
+**Exemplo**
+
+```bash
+curl -sS -X POST "${BASE_URL}/banner-corrida" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "conta@exemplo.com",
+    "senha": "***",
+    "imagem_url": "https://exemplo.com/banner.jpg",
+    "link_campanha": "https://exemplo.com/promo",
+    "limite_corridas": 1000,
+    "headless": true
+  }' \
+  --max-time 600
+```
+
+**Timeout recomendado:** 300–600 s.
+
+---
+
+## POST `/remover-banner-corrida`
+
+Corpo: **`RemoverAnuncioInput`**
+
+Remove campanha no ciclo da corrida (Recursos Premium):
+
+- **`indice` omitido ou `null`:** marca **Não** no toggle, apaga todas as campanhas e **Grava**.
+- **`indice` inteiro (0-based):** remove só a campanha na posição informada (botão excluir + **Gravar**).
+
+**Resposta 200:** `ResultadoOutput`
+
+**Exemplo (desativar tudo)**
+
+```bash
+curl -sS -X POST "${BASE_URL}/remover-banner-corrida" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "conta@exemplo.com",
+    "senha": "***",
+    "headless": true,
+    "manter_aberto": false
+  }' \
+  --max-time 600
+```
 
 **Timeout recomendado:** 300–600 s.
 
