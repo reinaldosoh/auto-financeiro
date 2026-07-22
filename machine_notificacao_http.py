@@ -138,6 +138,16 @@ def get_session(token: str) -> Optional[requests.Session]:
         return item["http"]
 
 
+def get_session_email(token: str) -> Optional[str]:
+    with _sessions_lock:
+        _cleanup_sessions()
+        item = _sessions.get(token)
+        if not item:
+            return None
+        item["created_at"] = _now()
+        return item.get("email")
+
+
 def _parse_json_response(response: requests.Response) -> Dict[str, Any]:
     try:
         return response.json()
@@ -450,6 +460,25 @@ def aguardar_relatorio(
     )
 
 
+def _resposta_precisa_2fa_acao(response: requests.Response) -> bool:
+    """Detecta se o painel pediu 2FA para ação sensível (enviar/agendar).
+
+    O markup `auth-modal` existe no layout de várias páginas (inclusive /index
+    após sucesso). Só considerar 2FA quando a resposta ainda está em /create
+    e há mensagem explícita de autenticação necessária.
+    """
+    if "/notificacao/index" in response.url:
+        return False
+    if "/notificacao/create" not in response.url:
+        return False
+    lower = (response.text or "").lower()
+    return (
+        "autenticacao necessária" in lower
+        or "autenticacao necessaria" in lower
+        or "autenticação necessária" in lower
+    )
+
+
 def enviar_ou_agendar(
     http: requests.Session,
     form: NotificacaoForm,
@@ -466,7 +495,7 @@ def enviar_ou_agendar(
 
     r = _post_create_form(http, form, "criar")
 
-    if "autenticacao necessária" in r.text.lower() or "auth-modal" in r.text:
+    if _resposta_precisa_2fa_acao(r):
         if not tentar_2fa:
             raise RuntimeError("Ação exige autenticação 2FA no painel.")
         autenticar_acao_2fa(

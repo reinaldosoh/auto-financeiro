@@ -67,6 +67,7 @@ from machine_notificacao_http import (
     filtrar_destinatarios,
     form_from_dict,
     get_session,
+    get_session_email,
     listar_notificacoes,
     login_painel,
     obter_bandeiras,
@@ -780,6 +781,15 @@ def _notificacao_http_erro(exc: Exception) -> HTTPException:
     )
 
 
+def _resolve_chave_acao(session_token: str, chave_secreta: Optional[str]) -> Optional[str]:
+    if chave_secreta:
+        return chave_secreta
+    email = get_session_email(session_token)
+    if email:
+        return obter_chave(email)
+    return None
+
+
 def _require_session(token: str):
     http = get_session(token)
     if not http:
@@ -973,6 +983,7 @@ async def notificacao_aguardar(inp: NotificacaoAguardarInput):
 @app.post("/notificacao/enviar")
 async def notificacao_enviar(inp: NotificacaoCampanhaInput):
     http = _require_session(inp.session_token)
+    chave = _resolve_chave_acao(inp.session_token, inp.chave_secreta)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -982,7 +993,7 @@ async def notificacao_enviar(inp: NotificacaoCampanhaInput):
                 _campanha_form(inp),
                 agendar=False,
                 codigo_2fa_acao=inp.codigo_2fa_acao,
-                chave_secreta=inp.chave_secreta,
+                chave_secreta=chave,
                 gerar_codigo_fn=gerar_codigo,
             ),
         )
@@ -993,6 +1004,7 @@ async def notificacao_enviar(inp: NotificacaoCampanhaInput):
 @app.post("/notificacao/agendar")
 async def notificacao_agendar(inp: NotificacaoAgendarInput):
     http = _require_session(inp.session_token)
+    chave = _resolve_chave_acao(inp.session_token, inp.chave_secreta)
     form = _campanha_form(inp)
     form.data_envio = inp.data_envio
     form.hora_envio = inp.hora_envio
@@ -1005,7 +1017,7 @@ async def notificacao_agendar(inp: NotificacaoAgendarInput):
                 form,
                 agendar=True,
                 codigo_2fa_acao=inp.codigo_2fa_acao,
-                chave_secreta=inp.chave_secreta,
+                chave_secreta=chave,
                 gerar_codigo_fn=gerar_codigo,
             ),
         )
