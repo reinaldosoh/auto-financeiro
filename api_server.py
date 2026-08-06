@@ -48,6 +48,9 @@ Endpoints:
     POST /notificacao/autenticar-acao - 2FA para ação sensível (envio)
     GET  /notificacao/listar          - Lista campanhas do painel
     DELETE /notificacao/{id}          - Cancela/exclui campanha agendada
+    POST /dinamica/login              - Login HTTP (mesma sessão cookie do painel)
+    GET  /dinamica/areas              - Lista áreas de tarifa dinâmica
+    POST /dinamica/areas/ativar       - Ativa/desativa área específica
     POST /financeiro_completo_02     - Fluxo financeiro (ganhos mês passado + taxas), JSON local;
                                        default: sem webhook, navegador visível, mantém aberto em background.
     POST /financeiro_historico_corridas - Histórico corridas (filtro mês anterior) + taxa central/seguro;
@@ -59,6 +62,7 @@ import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr, field_validator
 from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, executar_remover_anuncio_motorista, executar_adicionar_anuncio_passageiro, executar_remover_anuncio_passageiro, executar_adicionar_campanha_corrida, executar_remover_campanha_corrida, carregar_chaves, obter_chave, gerar_codigo
+from machine_dinamica_http import alterar_ativo_area, listar_areas
 from machine_notificacao_http import (
     aguardar_relatorio,
     autenticar_acao_2fa,
@@ -280,6 +284,14 @@ class NotificacaoAutenticarAcaoInput(BaseModel):
 class NotificacaoCancelarInput(BaseModel):
     session_token: str
     destinatario: str = "D"
+
+
+class DinamicaAtivarAreaInput(BaseModel):
+    session_token: str
+    bandeira_id: str
+    fator_id: str
+    area_id: str
+    ativo: bool = True
 
 
 @app.post("/autenticar", response_model=ResultadoOutput)
@@ -1068,6 +1080,60 @@ async def notificacao_cancelar(
         return await loop.run_in_executor(
             executor,
             lambda: cancelar_notificacao(http, notificacao_id, destinatario),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/dinamica/login")
+async def dinamica_login_http(inp: NotificacaoLoginInput):
+    """Login HTTP no painel — mesma sessão usada por /notificacao e /dinamica."""
+    return await notificacao_login_http(inp)
+
+
+@app.get("/dinamica/areas")
+async def dinamica_listar_areas(
+    session_token: str,
+    bandeira_id: str,
+    incluir_vertices: bool = False,
+    apenas_ativas: Optional[bool] = None,
+):
+    """
+    Lista áreas de tarifa dinâmica (mapa) da central.
+
+    Use `incluir_vertices=true` apenas se precisar dos polígonos (resposta grande).
+    """
+    http = _require_session(session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: listar_areas(
+                http,
+                bandeira_id=bandeira_id,
+                incluir_vertices=incluir_vertices,
+                apenas_ativas=apenas_ativas,
+            ),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/dinamica/areas/ativar")
+async def dinamica_ativar_area(inp: DinamicaAtivarAreaInput):
+    """Ativa ou desativa uma área de dinâmica manual."""
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: alterar_ativo_area(
+                http,
+                bandeira_id=inp.bandeira_id,
+                fator_id=inp.fator_id,
+                area_id=inp.area_id,
+                ativo=inp.ativo,
+            ),
         )
     except Exception as e:
         raise _notificacao_http_erro(e)
