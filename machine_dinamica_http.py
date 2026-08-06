@@ -96,6 +96,62 @@ def listar_areas(
     }
 
 
+def _vertices_para_string(vertices: List[Any]) -> str:
+    """
+    Converte lista de vértices para o formato do painel: 'lat,lng;lat,lng;'.
+    Aceita dicts {'lat','lng'} ou tuplas (lat, lng).
+    """
+    partes: List[str] = []
+    for v in vertices:
+        if isinstance(v, dict):
+            lat, lng = v.get("lat"), v.get("lng")
+        elif isinstance(v, (list, tuple)) and len(v) >= 2:
+            lat, lng = v[0], v[1]
+        else:
+            raise RuntimeError("Cada vértice deve ser {'lat','lng'} ou (lat, lng).")
+        if lat is None or lng is None:
+            raise RuntimeError("Vértice inválido: lat e lng são obrigatórios.")
+        partes.append(f"{lat},{lng}")
+    if len(partes) < 3:
+        raise RuntimeError("Polígono precisa de pelo menos 3 vértices.")
+    return ";".join(partes) + ";"
+
+
+def _parse_area_resposta(data: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "area_id": data.get("area_id"),
+        "fator_id": data.get("fator_id"),
+        "nome": data.get("nome"),
+        "ativo": data.get("ativo") in (1, "1", True),
+        "fator": data.get("fator"),
+        "tipo_calculo": data.get("tipo_calculo"),
+        "tipo_fator": data.get("tipo_fator"),
+        "valor_adicional": data.get("valor_adicional"),
+        "bandeira_id": data.get("bandeira_id"),
+        "cor_preenchimento": data.get("cor_preenchimento"),
+        "vertices": data.get("vertices") or [],
+        "lat_minima": data.get("lat_minima"),
+        "lat_maxima": data.get("lat_maxima"),
+        "lng_minima": data.get("lng_minima"),
+        "lng_maxima": data.get("lng_maxima"),
+    }
+
+
+def _extrair_erro_api(r: requests.Response) -> Optional[str]:
+    try:
+        body = r.json()
+        if isinstance(body, dict):
+            erros = body.get("errors")
+            if erros:
+                return erros[0] if isinstance(erros, list) else str(erros)
+            if body.get("success") is False:
+                return str(body)
+    except Exception:
+        pass
+    texto = (r.text or "").strip()
+    return texto[:300] if texto else None
+
+
 def alterar_ativo_area(
     http: requests.Session,
     bandeira_id: str,
@@ -114,10 +170,179 @@ def alterar_ativo_area(
         timeout=30,
     )
     ok = (r.text or "").strip().lower() == "true"
+    if not ok:
+        erro = _extrair_erro_api(r)
+        if erro:
+            raise RuntimeError(erro)
     return {
         "sucesso": ok,
         "fator_id": fator_id,
         "area_id": area_id,
         "ativo": ativo,
+        "resposta_bruta": (r.text or "").strip(),
+    }
+
+
+def editar_fator_area(
+    http: requests.Session,
+    bandeira_id: str,
+    fator_id: str,
+    area_id: str,
+    fator: str,
+    tipo_calculo: str = "M",
+    valor_adicional: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Altera apenas o multiplicador (ou valor adicional) de uma área existente.
+
+    Atenção: o painel gera um novo fator_id a cada edição — use o retorno
+    desta função nas próximas chamadas de ativar/desativar/editar.
+    """
+    eh_multiplicador = tipo_calculo == "M"
+    payload: Dict[str, Any] = {
+        "fator_id": fator_id,
+        "area_id": area_id,
+        "fator_area": fator if eh_multiplicador else "",
+        "tipo_calculo": tipo_calculo,
+        "area_alterada": "false",
+        "bandeira_id": bandeira_id,
+        "valor_adicional": valor_adicional if not eh_multiplicador else "",
+    }
+    r = http.post(
+        BASE_URL + "/tarifaCategoria/editarFatorDinamica",
+        data=payload,
+        timeout=30,
+    )
+    if not r.ok:
+        erro = _extrair_erro_api(r)
+        raise RuntimeError(erro or f"HTTP {r.status_code}")
+
+    try:
+        data = r.json()
+    except Exception as exc:
+        raise RuntimeError(f"Resposta inválida ao editar fator: {(r.text or '')[:300]}") from exc
+
+    if isinstance(data, dict) and data.get("success") is False:
+        raise RuntimeError(_extrair_erro_api(r) or "Erro ao editar fator.")
+
+    area = _parse_area_resposta(data)
+    return {"sucesso": True, "area": area, "fator_id_novo": area.get("fator_id")}
+
+
+def editar_area(
+    http: requests.Session,
+    bandeira_id: str,
+    fator_id: str,
+    area_id: str,
+    nome_area: str,
+    fator: str,
+    vertices: List[Any],
+    tipo_calculo: str = "M",
+    tipo_fator: str = "P",
+    cor_preenchimento: str = "#ffa500",
+    area_alterada: bool = True,
+    valor_adicional: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Edita área completa (nome, fator e/ou polígono)."""
+    eh_multiplicador = tipo_calculo == "M"
+    payload: Dict[str, Any] = {
+        "fator_id": fator_id,
+        "bandeira_id": bandeira_id,
+        "area_id": area_id,
+        "nome_area": nome_area,
+        "tipo_fator": tipo_fator,
+        "fator_area": fator if eh_multiplicador else "",
+        "valor_adicional": valor_adicional if not eh_multiplicador else "",
+        "vertices": _vertices_para_string(vertices),
+        "cor_preenchimento": cor_preenchimento,
+        "area_alterada": "true" if area_alterada else "false",
+        "tipo_calculo": tipo_calculo,
+    }
+    r = http.post(
+        BASE_URL + "/tarifaCategoria/editarFatorDinamica",
+        data=payload,
+        timeout=30,
+    )
+    if not r.ok:
+        erro = _extrair_erro_api(r)
+        raise RuntimeError(erro or f"HTTP {r.status_code}")
+
+    try:
+        data = r.json()
+    except Exception as exc:
+        raise RuntimeError(f"Resposta inválida ao editar área: {(r.text or '')[:300]}") from exc
+
+    if isinstance(data, dict) and data.get("success") is False:
+        raise RuntimeError(_extrair_erro_api(r) or "Erro ao editar área.")
+
+    area = _parse_area_resposta(data)
+    return {"sucesso": True, "area": area, "fator_id_novo": area.get("fator_id")}
+
+
+def criar_area(
+    http: requests.Session,
+    bandeira_id: str,
+    nome_area: str,
+    fator: str,
+    vertices: List[Any],
+    tipo_calculo: str = "M",
+    tipo_fator: str = "P",
+    cor_preenchimento: str = "#ffa500",
+    valor_adicional: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Cria nova área de dinâmica manual com polígono."""
+    eh_multiplicador = tipo_calculo == "M"
+    payload: Dict[str, Any] = {
+        "nome_area": nome_area,
+        "fator_area": fator if eh_multiplicador else "",
+        "valor_adicional": valor_adicional if not eh_multiplicador else "",
+        "bandeira_id": bandeira_id,
+        "tipo_fator": tipo_fator,
+        "vertices": _vertices_para_string(vertices),
+        "cor_preenchimento": cor_preenchimento,
+        "tipo_calculo": tipo_calculo,
+    }
+    r = http.post(
+        BASE_URL + "/tarifaCategoria/criarAreaDinamica",
+        data=payload,
+        timeout=30,
+    )
+    if not r.ok:
+        erro = _extrair_erro_api(r)
+        raise RuntimeError(erro or f"HTTP {r.status_code}")
+
+    try:
+        data = r.json()
+    except Exception as exc:
+        raise RuntimeError(f"Resposta inválida ao criar área: {(r.text or '')[:300]}") from exc
+
+    area = _parse_area_resposta(data)
+    return {"sucesso": True, "area": area}
+
+
+def apagar_area(
+    http: requests.Session,
+    bandeira_id: str,
+    fator_id: str,
+    area_id: str,
+) -> Dict[str, Any]:
+    r = http.post(
+        BASE_URL + "/tarifaCategoria/apagarFatorDinamica",
+        data={
+            "fator_id": fator_id,
+            "area_id": area_id,
+            "bandeira_id": bandeira_id,
+        },
+        timeout=30,
+    )
+    ok = (r.text or "").strip().lower() == "true"
+    if not ok:
+        erro = _extrair_erro_api(r)
+        if erro:
+            raise RuntimeError(erro)
+    return {
+        "sucesso": ok,
+        "fator_id": fator_id,
+        "area_id": area_id,
         "resposta_bruta": (r.text or "").strip(),
     }

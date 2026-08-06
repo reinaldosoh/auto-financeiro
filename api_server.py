@@ -51,6 +51,10 @@ Endpoints:
     POST /dinamica/login              - Login HTTP (mesma sessão cookie do painel)
     GET  /dinamica/areas              - Lista áreas de tarifa dinâmica
     POST /dinamica/areas/ativar       - Ativa/desativa área específica
+    POST /dinamica/areas/editar-fator - Altera multiplicador de uma área
+    POST /dinamica/areas/editar       - Edita área completa (nome/fator/polígono)
+    POST /dinamica/areas/criar        - Cria nova área com polígono
+    POST /dinamica/areas/apagar       - Remove área de dinâmica
     POST /financeiro_completo_02     - Fluxo financeiro (ganhos mês passado + taxas), JSON local;
                                        default: sem webhook, navegador visível, mantém aberto em background.
     POST /financeiro_historico_corridas - Histórico corridas (filtro mês anterior) + taxa central/seguro;
@@ -62,7 +66,14 @@ import threading
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr, field_validator
 from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, executar_remover_anuncio_motorista, executar_adicionar_anuncio_passageiro, executar_remover_anuncio_passageiro, executar_adicionar_campanha_corrida, executar_remover_campanha_corrida, carregar_chaves, obter_chave, gerar_codigo
-from machine_dinamica_http import alterar_ativo_area, listar_areas
+from machine_dinamica_http import (
+    alterar_ativo_area,
+    apagar_area,
+    criar_area,
+    editar_area,
+    editar_fator_area,
+    listar_areas,
+)
 from machine_notificacao_http import (
     aguardar_relatorio,
     autenticar_acao_2fa,
@@ -292,6 +303,55 @@ class DinamicaAtivarAreaInput(BaseModel):
     fator_id: str
     area_id: str
     ativo: bool = True
+
+
+class DinamicaVerticeInput(BaseModel):
+    lat: str
+    lng: str
+
+
+class DinamicaEditarFatorInput(BaseModel):
+    session_token: str
+    bandeira_id: str
+    fator_id: str
+    area_id: str
+    fator: str
+    tipo_calculo: str = "M"
+    valor_adicional: Optional[str] = None
+
+
+class DinamicaEditarAreaInput(BaseModel):
+    session_token: str
+    bandeira_id: str
+    fator_id: str
+    area_id: str
+    nome_area: str
+    fator: str
+    vertices: List[DinamicaVerticeInput]
+    tipo_calculo: str = "M"
+    tipo_fator: str = "P"
+    cor_preenchimento: str = "#ffa500"
+    area_alterada: bool = True
+    valor_adicional: Optional[str] = None
+
+
+class DinamicaCriarAreaInput(BaseModel):
+    session_token: str
+    bandeira_id: str
+    nome_area: str
+    fator: str
+    vertices: List[DinamicaVerticeInput]
+    tipo_calculo: str = "M"
+    tipo_fator: str = "P"
+    cor_preenchimento: str = "#ffa500"
+    valor_adicional: Optional[str] = None
+
+
+class DinamicaApagarAreaInput(BaseModel):
+    session_token: str
+    bandeira_id: str
+    fator_id: str
+    area_id: str
 
 
 @app.post("/autenticar", response_model=ResultadoOutput)
@@ -1133,6 +1193,104 @@ async def dinamica_ativar_area(inp: DinamicaAtivarAreaInput):
                 fator_id=inp.fator_id,
                 area_id=inp.area_id,
                 ativo=inp.ativo,
+            ),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/dinamica/areas/editar-fator")
+async def dinamica_editar_fator(inp: DinamicaEditarFatorInput):
+    """
+    Altera o multiplicador (ou valor adicional) de uma área.
+
+    O painel gera um **novo fator_id** a cada edição — guarde `fator_id_novo` do retorno.
+    """
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: editar_fator_area(
+                http,
+                bandeira_id=inp.bandeira_id,
+                fator_id=inp.fator_id,
+                area_id=inp.area_id,
+                fator=inp.fator,
+                tipo_calculo=inp.tipo_calculo,
+                valor_adicional=inp.valor_adicional,
+            ),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/dinamica/areas/editar")
+async def dinamica_editar_area(inp: DinamicaEditarAreaInput):
+    """Edita nome, fator e/ou polígono de uma área existente."""
+    http = _require_session(inp.session_token)
+    vertices = [v.model_dump() for v in inp.vertices]
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: editar_area(
+                http,
+                bandeira_id=inp.bandeira_id,
+                fator_id=inp.fator_id,
+                area_id=inp.area_id,
+                nome_area=inp.nome_area,
+                fator=inp.fator,
+                vertices=vertices,
+                tipo_calculo=inp.tipo_calculo,
+                tipo_fator=inp.tipo_fator,
+                cor_preenchimento=inp.cor_preenchimento,
+                area_alterada=inp.area_alterada,
+                valor_adicional=inp.valor_adicional,
+            ),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/dinamica/areas/criar")
+async def dinamica_criar_area(inp: DinamicaCriarAreaInput):
+    """Cria nova área de dinâmica manual informando polígono (mín. 3 vértices)."""
+    http = _require_session(inp.session_token)
+    vertices = [v.model_dump() for v in inp.vertices]
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: criar_area(
+                http,
+                bandeira_id=inp.bandeira_id,
+                nome_area=inp.nome_area,
+                fator=inp.fator,
+                vertices=vertices,
+                tipo_calculo=inp.tipo_calculo,
+                tipo_fator=inp.tipo_fator,
+                cor_preenchimento=inp.cor_preenchimento,
+                valor_adicional=inp.valor_adicional,
+            ),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/dinamica/areas/apagar")
+async def dinamica_apagar_area(inp: DinamicaApagarAreaInput):
+    """Remove uma área de dinâmica manual."""
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: apagar_area(
+                http,
+                bandeira_id=inp.bandeira_id,
+                fator_id=inp.fator_id,
+                area_id=inp.area_id,
             ),
         )
     except Exception as e:
