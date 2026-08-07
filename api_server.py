@@ -29,12 +29,15 @@ Endpoints:
     POST /login            - Login com 2FA (chave salva no servidor)
     GET  /chaves           - Lista emails com chave TOTP salva no disco do servidor
     POST /codigo           - Gera código TOTP para um email
-    POST /anuncio-motorista
+    POST /anuncio-motorista             - HTTP direto no painel (sem Selenium)
     POST /remover-anuncio
-    POST /anuncio-passageiro
+    POST /anuncio-passageiro            - HTTP direto no painel (sem Selenium)
     POST /remover-anuncio-passageiro  (JSON opcional: indice inteiro 0-based; omitir = remover todos)
-    POST /banner-corrida              - Campanha no ciclo da corrida (app passageiro)
-    POST /remover-banner-corrida      - Remove/desativa campanha no ciclo da corrida
+    POST /banner-corrida              - Campanha ciclo da corrida via HTTP (sem Selenium)
+    POST /remover-banner-corrida
+    POST /banner/motorista            - Alias HTTP com session_token (opcional)
+    POST /banner/passageiro
+    POST /banner/corrida
     POST /notificacao/login           - Login HTTP no painel (cookie de sessão, sem Selenium)
     GET  /notificacao/bandeiras       - Centrais disponíveis na conta
     GET  /notificacao/categorias      - Categorias para filtros de notificação em massa
@@ -65,7 +68,15 @@ import threading
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr, field_validator
-from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, executar_adicionar_anuncio_motorista, executar_remover_anuncio_motorista, executar_adicionar_anuncio_passageiro, executar_remover_anuncio_passageiro, executar_adicionar_campanha_corrida, executar_remover_campanha_corrida, carregar_chaves, obter_chave, gerar_codigo
+from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, carregar_chaves, obter_chave, gerar_codigo
+from machine_bandeira_http import (
+    executar_adicionar_anuncio_motorista_http as executar_adicionar_anuncio_motorista,
+    executar_adicionar_anuncio_passageiro_http as executar_adicionar_anuncio_passageiro,
+    executar_adicionar_campanha_corrida_http as executar_adicionar_campanha_corrida,
+    executar_remover_anuncio_motorista_http as executar_remover_anuncio_motorista,
+    executar_remover_anuncio_passageiro_http as executar_remover_anuncio_passageiro,
+    executar_remover_campanha_corrida_http as executar_remover_campanha_corrida,
+)
 from machine_dinamica_http import (
     alterar_ativo_area,
     apagar_area,
@@ -484,9 +495,8 @@ async def recursos_premium(creds: CredenciaisInput):
 @app.post("/anuncio-motorista", response_model=ResultadoOutput)
 async def anuncio_motorista(input_data: AnuncioMotoristaInput):
     """
-    Recebe credenciais e infomações do anúncio (imagem, link, checkbox).
+    Cadastra anúncio motorista via HTTP (/bandeira/update + upload S3).
     A imagem pode ser passada via URL pública (imagem_url) ou em base64 (imagem_base64).
-    Faz login, navega para Recursos Premium e preenche o anúncio na seção de motoristas.
     """
     log.info("Requisição (anuncio-motorista) recebida para: %s", input_data.email)
 
@@ -590,8 +600,8 @@ async def remover_anuncio(creds: RemoverAnuncioInput):
 @app.post("/anuncio-passageiro", response_model=ResultadoOutput)
 async def anuncio_passageiro(input_data: AnuncioMotoristaInput):
     """
-    Recebe credenciais e infomações do anúncio (imagem, link, checkbox).
-    Faz login, navega para Recursos Premium e preenche o anúncio na seção de passageiros.
+    Cadastra anúncio passageiro via HTTP (/bandeira/update + upload S3).
+    link_anuncio é obrigatório.
     """
     log.info("Requisição (anuncio-passageiro) recebida para: %s", input_data.email)
 
@@ -664,8 +674,7 @@ async def anuncio_passageiro(input_data: AnuncioMotoristaInput):
 @app.post("/banner-corrida", response_model=ResultadoOutput)
 async def banner_corrida(input_data: BannerCorridaInput):
     """
-    Campanha no ciclo da corrida no app passageiro (Recursos Premium).
-    Preenche imagem, link opcional, centrais, limite de corridas e período, e clica em Gravar.
+    Campanha no ciclo da corrida via HTTP (/bandeira/update + upload S3).
     """
     log.info("Requisição (banner-corrida) recebida para: %s", input_data.email)
 
