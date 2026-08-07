@@ -175,6 +175,7 @@ class AnuncioMotoristaInput(BaseModel):
     imagem_base64: str = None
     link_anuncio: str = ""
     selecionar_todas: bool = True
+    bandeira_ids: Optional[List[str]] = None
 
 
 class BannerCorridaInput(BaseModel):
@@ -649,7 +650,8 @@ async def anuncio_passageiro(input_data: AnuncioMotoristaInput):
         manter_aberto=input_data.manter_aberto,
         imagem_path=tmp_imagem_path,
         link_anuncio=input_data.link_anuncio,
-        selecionar_todas=input_data.selecionar_todas
+        selecionar_todas=input_data.selecionar_todas,
+        bandeira_ids=input_data.bandeira_ids,
     )
 
     try:

@@ -139,7 +139,22 @@ def _extrair_lista_js(html: str, var_name: str) -> List[Dict[str, Any]]:
         return []
 
 
-def _ids_bandeiras(html: str, http: requests.Session, selecionar_todas: bool) -> List[str]:
+def _max_anuncios_passageiro(html: str) -> int:
+    """Limite real do painel (MAP_ANUNCIO_TIPO_MAX); passageiro = 70 na UBIZ CAR."""
+    m = re.search(r"TIPO_TELA_INICIAL_APP_PASSAGEIRO\]\s*:\s*(\d+)", html)
+    if m:
+        return int(m.group(1))
+    return 70
+
+
+def _ids_bandeiras(
+    html: str,
+    http: requests.Session,
+    selecionar_todas: bool,
+    bandeira_ids: Optional[List[str]] = None,
+) -> List[str]:
+    if bandeira_ids:
+        return [str(b) for b in bandeira_ids if str(b).strip()]
     if not selecionar_todas:
         return []
     m = re.search(r"window\.listaBandeiras\s*=\s*(\{[^;]+\})", html)
@@ -283,6 +298,68 @@ def _preencher_slot_anuncio(
         fields[f"{base}[bandeiras][]"] = list(bandeira_ids)
 
 
+def _mesclar_lista_anuncios_no_form(
+    fields: Dict[str, List[str]],
+    nome_mod: str,
+    lista: List[Dict[str, Any]],
+    idx_editar: int,
+) -> None:
+    """Preserva anúncios existentes no POST ao editar/adicionar um slot."""
+    for idx, item in enumerate(lista):
+        if idx == idx_editar:
+            continue
+        base = f"{nome_mod}[lista][{idx}]"
+        if str(item.get("excluido", "0")) == "1":
+            _set_field(fields, f"{base}[excluido]", "1")
+            if item.get("id"):
+                _set_field(fields, f"{base}[id]", str(item["id"]))
+            continue
+        _set_field(fields, f"{base}[url_imagem]", (item.get("url_imagem") or "").strip())
+        _set_field(fields, f"{base}[url_anuncio]", (item.get("url_anuncio") or "").strip())
+        _set_field(fields, f"{base}[excluido]", "0")
+        _set_field(fields, f"{base}[ativo]", "1")
+        if item.get("id"):
+            _set_field(fields, f"{base}[id]", str(item["id"]))
+        bs = item.get("bandeiras") or []
+        if bs:
+            fields[f"{base}[bandeiras][]"] = [str(b) for b in bs]
+
+
+def _escolher_slot_passageiro(
+    lista: List[Dict[str, Any]],
+    html: str,
+    bandeira_ids: Optional[List[str]] = None,
+) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Escolhe índice para gravar anúncio passageiro.
+    Prioridade: slot da bandeira alvo → slot vazio → novo índice (até max do painel).
+    """
+    alvo = {str(b) for b in (bandeira_ids or []) if str(b).strip()}
+
+    if alvo:
+        for idx, item in enumerate(lista):
+            if str(item.get("excluido", "0")) == "1":
+                continue
+            bs = {str(b) for b in (item.get("bandeiras") or [])}
+            if bs & alvo:
+                return idx, "bandeira"
+
+    for idx, item in enumerate(lista):
+        if str(item.get("excluido", "0")) == "1":
+            return idx, "excluido"
+        if not (item.get("url_imagem") or item.get("url_anuncio")):
+            return idx, "vazio"
+
+    maximo = _max_anuncios_passageiro(html)
+    ativos = [
+        a for a in lista
+        if str(a.get("excluido", "0")) != "1" and (a.get("url_imagem") or a.get("url_anuncio"))
+    ]
+    if len(ativos) >= maximo:
+        return None, f"Limite de {maximo} anúncios passageiros no painel."
+    return len(lista), "novo"
+
+
 def _preencher_slot_campanha(
     fields: Dict[str, List[str]],
     idx: int,
@@ -387,6 +464,7 @@ def criar_anuncio_passageiro(
     img_bytes: bytes,
     link_anuncio: str,
     selecionar_todas: bool = True,
+    bandeira_ids: Optional[List[str]] = None,
     chave_secreta: Optional[str] = None,
     gerar_codigo_fn: Optional[Callable[[str], str]] = None,
 ) -> Dict[str, Any]:
@@ -400,23 +478,19 @@ def criar_anuncio_passageiro(
 
     _ativar_exibir(fields, f"{nome_mod}[exibir_anuncio]")
 
-    novo_idx: Optional[int] = None
-    for idx, item in enumerate(lista):
-        if str(item.get("excluido", "0")) == "1":
-            novo_idx = idx
-            break
-        if not (item.get("url_imagem") or item.get("url_anuncio")):
-            novo_idx = idx
-            break
-
+    novo_idx, modo = _escolher_slot_passageiro(lista, html, bandeira_ids)
     if novo_idx is None:
-        ativos = [a for a in lista if str(a.get("excluido", "0")) != "1" and a.get("url_imagem")]
-        if len(ativos) >= 3:
-            return {"sucesso": False, "mensagem": "Limite de 3 anúncios passageiros no painel."}
-        novo_idx = len(lista)
+        return {"sucesso": False, "mensagem": str(modo)}
 
     url_s3 = upload_imagem_configuracao(http, bandeira_id, img_bytes, "anuncio", "anuncio")
-    ids = _ids_bandeiras(html, http, selecionar_todas)
+    ids = _ids_bandeiras(html, http, selecionar_todas, bandeira_ids)
+    if not ids and not selecionar_todas:
+        return {
+            "sucesso": False,
+            "mensagem": "Informe bandeira_ids ou selecionar_todas=true.",
+        }
+
+    _mesclar_lista_anuncios_no_form(fields, nome_mod, lista, novo_idx)
     item_id = str(lista[novo_idx].get("id") or "") if novo_idx < len(lista) else ""
     _preencher_slot_anuncio(
         fields, nome_mod, novo_idx, url_s3, link_limpo, ids, item_id=item_id,
@@ -431,8 +505,8 @@ def criar_anuncio_passageiro(
 
     return {
         "sucesso": True,
-        "mensagem": f"Anúncio passageiro gravado na Machine. URL: {url_s3}",
-        "verificacao": verif,
+        "mensagem": f"Anúncio passageiro gravado na Machine (slot {novo_idx}, {modo}). URL: {url_s3}",
+        "verificacao": {**verif, "modo_slot": modo},
     }
 
 
@@ -663,11 +737,14 @@ def executar_adicionar_anuncio_passageiro_http(
     imagem_path: str,
     link_anuncio: str = "",
     selecionar_todas: bool = True,
+    bandeira_ids: Optional[List[str]] = None,
     **_: Any,
 ) -> Dict[str, Any]:
     return _executar_criar(
         email, senha, chave_secreta, imagem_path, criar_anuncio_passageiro,
-        link_anuncio=link_anuncio, selecionar_todas=selecionar_todas,
+        link_anuncio=link_anuncio,
+        selecionar_todas=selecionar_todas,
+        bandeira_ids=bandeira_ids,
     )
 
 
