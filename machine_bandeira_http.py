@@ -8,6 +8,7 @@ Reutiliza login e sessão de machine_notificacao_http.
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 from collections import defaultdict
@@ -21,14 +22,19 @@ from machine_notificacao_http import (
     BASE_URL,
     _extrair_js_json,
     _parse_json_response,
-    autenticar_acao_2fa,
     get_session,
     login_painel,
+    obter_bandeiras,
 )
 
 log = logging.getLogger(__name__)
 
 REFERER_BANDEIRA = BASE_URL + "/bandeira/update"
+
+# Variáveis JS do painel (anuncio.js / campanha.js)
+JS_LISTA_PASSAGEIRO = "listaAnunciosTelaInicialAppPassageiro"
+JS_LISTA_MOTORISTA = "listaAnunciosTelaInicialAppTaxista"
+JS_LISTA_CAMPANHA = "listaCampanhas"
 
 
 class _BandeiraFormParser(HTMLParser):
@@ -120,53 +126,107 @@ def _set_field(fields: Dict[str, List[str]], name: str, value: str) -> None:
     fields[name] = [value]
 
 
-def _indices_campo(fields: Dict[str, List[str]], prefix: str, suffix: str) -> List[int]:
-    pat = re.compile(rf"^{re.escape(prefix)}_(\d+)_{re.escape(suffix)}$")
-    idxs: List[int] = []
-    for name in fields:
-        m = pat.match(name)
-        if m:
-            idxs.append(int(m.group(1)))
-    return sorted(set(idxs))
-
-
-def _slot_ocupado(fields: Dict[str, List[str]], prefix: str, idx: int) -> bool:
-    excl = (fields.get(f"{prefix}_{idx}_excluido") or ["0"])[0]
-    if str(excl).strip() == "1":
-        return False
-    img = (fields.get(f"{prefix}_{idx}_url_imagem") or [""])[0].strip()
-    link = (fields.get(f"{prefix}_{idx}_url_anuncio") or [""])[0].strip()
-    url_c = (fields.get(f"{prefix}_{idx}_url_campanha") or [""])[0].strip()
-    return bool(img or link or url_c)
-
-
-def _opcoes_select(html: str, select_name: str) -> List[str]:
-    block_pat = rf'<select[^>]+name="{re.escape(select_name)}"[^>]*>(.*?)</select>'
-    m = re.search(block_pat, html, re.S | re.I)
-    if not m:
-        block_pat = rf'<select[^>]+name="{re.escape(select_name)}\[\]"[^>]*>(.*?)</select>'
-        m = re.search(block_pat, html, re.S | re.I)
+def _extrair_lista_js(html: str, var_name: str) -> List[Dict[str, Any]]:
+    data = _extrair_js_json(html, var_name)
+    if isinstance(data, list):
+        return data
+    m = re.search(rf"{re.escape(var_name)}\s*=\s*(\[[\s\S]*?\])\s*;", html)
     if not m:
         return []
-    opts = re.findall(r'<option[^>]+value="([^"]+)"', m.group(1), re.I)
-    return [o for o in opts if o and o != "multiselect-all"]
+    try:
+        return json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return []
 
 
-def _selecionar_todas_bandeiras(
-    fields: Dict[str, List[str]],
-    html: str,
-    select_name: str,
-    selecionar_todas: bool,
-    bandeira_ids: Optional[List[str]] = None,
+def _ids_bandeiras(html: str, http: requests.Session, selecionar_todas: bool) -> List[str]:
+    if not selecionar_todas:
+        return []
+    m = re.search(r"window\.listaBandeiras\s*=\s*(\{[^;]+\})", html)
+    if m:
+        try:
+            return list(json.loads(m.group(1)).keys())
+        except json.JSONDecodeError:
+            pass
+    return [b["id"] for b in obter_bandeiras(http) if b.get("id")]
+
+
+def _autenticar_acao_bandeira(
+    http: requests.Session,
+    chave_secreta: Optional[str],
+    gerar_codigo_fn: Optional[Callable[[str], str]],
 ) -> None:
-    if not selecionar_todas and not bandeira_ids:
-        return
-    ids = bandeira_ids or _opcoes_select(html, select_name)
-    if not ids:
-        ids = _opcoes_select(html, select_name + "[]")
-    if ids:
-        fields[select_name] = list(ids)
-        fields[select_name + "[]"] = list(ids)
+    code = None
+    if chave_secreta and gerar_codigo_fn:
+        code = gerar_codigo_fn(chave_secreta.replace(" ", ""))
+    if not code:
+        raise RuntimeError("2FA de ação exigido ao gravar banner — informe chave_secreta válida.")
+
+    r = http.post(
+        BASE_URL + "/site/autenticarUsuario2FA",
+        data={"code": code},
+        headers={"Referer": REFERER_BANDEIRA},
+        timeout=30,
+    )
+    data = _parse_json_response(r)
+    if not data.get("success"):
+        msg = data.get("message") or "Falha na autenticação 2FA da ação (bandeira)."
+        raise RuntimeError(msg)
+
+
+def _resposta_precisa_2fa_acao(response: requests.Response) -> bool:
+    lower = (response.text or "").lower()
+    return (
+        "autenticacao necessária" in lower
+        or "autenticacao necessaria" in lower
+        or "autenticação necessária" in lower
+        or "solicitar2fa" in lower and "auth-modal" in lower
+    )
+
+
+def salvar_bandeira(
+    http: requests.Session,
+    fields: Dict[str, List[str]],
+    chave_secreta: Optional[str] = None,
+    gerar_codigo_fn: Optional[Callable[[str], str]] = None,
+) -> str:
+    """POST /bandeira/update. Retorna HTML da resposta para verificação."""
+    pairs: List[Tuple[str, str]] = []
+    for name, values in fields.items():
+        for val in values:
+            pairs.append((name, val))
+
+    # Botão real do painel: name=yt1 (não yt0)
+    if not any(n.startswith("yt") for n in fields):
+        pairs.append(("yt1", "Gravar"))
+
+    r = http.post(
+        BASE_URL + "/bandeira/update",
+        data=pairs,
+        headers={"Referer": REFERER_BANDEIRA},
+        timeout=180,
+        allow_redirects=True,
+    )
+
+    if _resposta_precisa_2fa_acao(r):
+        log.info("Gravar bandeira pediu 2FA de ação — autenticando…")
+        _autenticar_acao_bandeira(http, chave_secreta, gerar_codigo_fn)
+        r = http.post(
+            BASE_URL + "/bandeira/update",
+            data=pairs,
+            headers={"Referer": REFERER_BANDEIRA},
+            timeout=180,
+            allow_redirects=True,
+        )
+
+    if "LoginForm" in r.text and "bandeira-form" not in r.text:
+        raise RuntimeError("Sessão expirada ao gravar bandeira.")
+
+    erros = re.findall(r'class="errorMessage[^"]*"[^>]*>([^<]+)', r.text or "")
+    if erros:
+        raise RuntimeError("; ".join(e.strip() for e in erros if e.strip()))
+
+    return r.text or ""
 
 
 def upload_imagem_configuracao(
@@ -198,74 +258,92 @@ def upload_imagem_configuracao(
     return url_s3
 
 
-def _resposta_precisa_2fa_acao(response: requests.Response) -> bool:
-    if "/bandeira/update" not in response.url and response.status_code == 200:
-        lower = (response.text or "").lower()
-        if "loginform" in lower and "bandeira-form" not in lower:
-            return False
-    lower = (response.text or "").lower()
-    return (
-        "autenticacao necessária" in lower
-        or "autenticacao necessaria" in lower
-        or "autenticação necessária" in lower
-        or ("auth-modal" in lower and "bandeira" in lower)
-    )
+def _ativar_exibir(fields: Dict[str, List[str]], nome_campo: str) -> None:
+    """Sim = valor '1' no painel (id *_0)."""
+    _set_field(fields, nome_campo, "1")
 
 
-def salvar_bandeira(
-    http: requests.Session,
+def _preencher_slot_anuncio(
     fields: Dict[str, List[str]],
-    chave_secreta: Optional[str] = None,
-    gerar_codigo_fn: Optional[Callable[[str], str]] = None,
+    nome_mod: str,
+    idx: int,
+    url_imagem: str,
+    link: str,
+    bandeira_ids: List[str],
+    item_id: str = "",
+    excluido: str = "0",
 ) -> None:
-    pairs: List[Tuple[str, str]] = []
-    for name, values in fields.items():
-        for val in values:
-            pairs.append((name, val))
-
-    if not any(n.startswith("yt") for n in fields):
-        pairs.append(("yt0", "Gravar"))
-
-    r = http.post(
-        BASE_URL + "/bandeira/update",
-        data=pairs,
-        headers={"Referer": REFERER_BANDEIRA},
-        timeout=180,
-        allow_redirects=True,
-    )
-
-    if _resposta_precisa_2fa_acao(r):
-        autenticar_acao_2fa(
-            http,
-            chave_secreta=chave_secreta,
-            gerar_codigo_fn=gerar_codigo_fn,
-        )
-        r = http.post(
-            BASE_URL + "/bandeira/update",
-            data=pairs,
-            headers={"Referer": REFERER_BANDEIRA},
-            timeout=180,
-            allow_redirects=True,
-        )
-
-    if "LoginForm" in r.text and "bandeira-form" not in r.text:
-        raise RuntimeError("Sessão expirada ao gravar bandeira.")
-
-    erros = re.findall(r'class="errorMessage[^"]*"[^>]*>([^<]+)', r.text or "")
-    if erros:
-        raise RuntimeError("; ".join(e.strip() for e in erros if e.strip()))
-
-    lower = (r.text or "").lower()
-    if "erro" in lower and "sucesso" not in lower and len(r.text or "") < 5000:
-        if "errorMessage" in r.text:
-            raise RuntimeError("Erro ao gravar configurações da bandeira.")
+    base = f"{nome_mod}[lista][{idx}]"
+    _set_field(fields, f"{base}[url_imagem]", url_imagem)
+    _set_field(fields, f"{base}[url_anuncio]", link)
+    _set_field(fields, f"{base}[excluido]", excluido)
+    _set_field(fields, f"{base}[ativo]", "1")
+    _set_field(fields, f"{base}[id]", item_id)
+    if bandeira_ids:
+        fields[f"{base}[bandeiras][]"] = list(bandeira_ids)
 
 
-def _ativar_exibir(fields: Dict[str, List[str]], prefix: str, sim: bool = True) -> None:
-    _set_field(fields, f"{prefix}_exibir_anuncio_0", "1" if sim else "0")
-    _set_field(fields, f"{prefix}_exibir_anuncio_1", "0" if sim else "1")
-    if sim:
-        _set_field(fields, f"{prefix}_exibir_anuncio", "0")
+def _preencher_slot_campanha(
+    fields: Dict[str, List[str]],
+    idx: int,
+    url_imagem: str,
+    link: str,
+    limite: str,
+    data_ini: str,
+    data_fim: str,
+    bandeira_ids: List[str],
+    item_id: str = "",
+    excluido: str = "0",
+) -> None:
+    base = f"Campanha[lista][{idx}]"
+    _set_field(fields, f"{base}[url_imagem]", url_imagem)
+    _set_field(fields, f"{base}[url_campanha]", link)
+    _set_field(fields, f"{base}[excluido]", excluido)
+    _set_field(fields, f"{base}[ativo]", "1")
+    _set_field(fields, f"{base}[id]", item_id)
+    _set_field(fields, f"{base}[limite_solicitacoes_finalizadas]", limite)
+    _set_field(fields, f"{base}[data_hora_inicio]", data_ini)
+    _set_field(fields, f"{base}[data_hora_fim]", data_fim)
+    if bandeira_ids:
+        fields[f"{base}[bandeiras][]"] = list(bandeira_ids)
+
+
+def _marcar_excluidos_lista(
+    fields: Dict[str, List[str]],
+    nome_mod: str,
+    lista: List[Dict[str, Any]],
+) -> None:
+    for idx, item in enumerate(lista):
+        if str(item.get("excluido", "0")) == "1":
+            continue
+        if item.get("url_imagem") or item.get("url_anuncio"):
+            _set_field(fields, f"{nome_mod}[lista][{idx}][excluido]", "1")
+            if item.get("id"):
+                _set_field(fields, f"{nome_mod}[lista][{idx}][id]", str(item["id"]))
+
+
+def _verificar_anuncio_salvo(
+    html_resposta: str,
+    js_var: str,
+    url_esperada: str,
+    link_esperado: str = "",
+) -> Dict[str, Any]:
+    lista = _extrair_lista_js(html_resposta, js_var)
+    ativos = [
+        a for a in lista
+        if str(a.get("excluido", "0")) != "1" and (a.get("url_imagem") or "").strip()
+    ]
+    for i, a in enumerate(ativos):
+        url = (a.get("url_imagem") or "").strip()
+        if url_esperada.split("/")[-1] in url or url == url_esperada:
+            return {
+                "salvo": True,
+                "validado": True,
+                "dom_slot_idx": lista.index(a) if a in lista else i,
+                "url_imagem": url,
+                "bandeiras": a.get("bandeiras") or [],
+            }
+    return {"salvo": False, "validado": False, "lista": lista}
 
 
 def criar_anuncio_motorista(
@@ -276,39 +354,31 @@ def criar_anuncio_motorista(
     chave_secreta: Optional[str] = None,
     gerar_codigo_fn: Optional[Callable[[str], str]] = None,
 ) -> Dict[str, Any]:
-    prefix = "AnuncioAppTaxista"
-    tipo = "tela_inicial_app_taxista"
+    nome_mod = "AnuncioAppTaxista"
     bandeira_id, fields, html = carregar_form_bandeira(http)
+    lista = _extrair_lista_js(html, JS_LISTA_MOTORISTA)
 
-    _ativar_exibir(fields, prefix, True)
+    _ativar_exibir(fields, f"{nome_mod}[exibir_anuncio]")
+    _marcar_excluidos_lista(fields, nome_mod, lista)
 
-    idxs = _indices_campo(fields, prefix, "url_imagem")
-    if not idxs:
-        idxs = [0]
-
-    for idx in idxs:
-        if _slot_ocupado(fields, prefix, idx):
-            _set_field(fields, f"{prefix}_{idx}_excluido", "1")
-
-    novo_idx = max(idxs) + 1 if idxs else 1
-    if novo_idx <= max(idxs):
-        novo_idx = max(idxs) + 1
-
+    novo_idx = len(lista) if lista else 0
     url_s3 = upload_imagem_configuracao(http, bandeira_id, img_bytes, "anuncio", "anuncio")
-    _set_field(fields, f"{prefix}_{novo_idx}_url_imagem", url_s3)
-    _set_field(fields, f"{prefix}_{novo_idx}_excluido", "0")
-    if link_anuncio:
-        _set_field(fields, f"{prefix}_{novo_idx}_url_anuncio", link_anuncio.strip())
+    ids = _ids_bandeiras(html, http, selecionar_todas)
+    _preencher_slot_anuncio(
+        fields, nome_mod, novo_idx, url_s3, (link_anuncio or "").strip(), ids,
+    )
 
-    sel = f"filtro_bandeiras_anuncio_{tipo}_{novo_idx}"
-    _selecionar_todas_bandeiras(fields, html, sel, selecionar_todas)
-
-    salvar_bandeira(http, fields, chave_secreta=chave_secreta, gerar_codigo_fn=gerar_codigo_fn)
+    html_save = salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
+    verif = _verificar_anuncio_salvo(html_save, JS_LISTA_MOTORISTA, url_s3, link_anuncio)
+    if not verif.get("salvo"):
+        raise RuntimeError(
+            "Upload OK, mas o anúncio motorista não persistiu no painel após gravar."
+        )
 
     return {
         "sucesso": True,
-        "mensagem": f"Anúncio motorista configurado via HTTP. URL: {url_s3}",
-        "verificacao": {"url_imagem": url_s3, "dom_idx": novo_idx},
+        "mensagem": f"Anúncio motorista gravado na Machine. URL: {url_s3}",
+        "verificacao": verif,
     }
 
 
@@ -324,44 +394,45 @@ def criar_anuncio_passageiro(
     if not link_limpo:
         return {"sucesso": False, "mensagem": "link_anuncio é obrigatório para passageiro."}
 
-    prefix = "AnuncioTelaInicialAppPass"
-    tipo = "tela_inicial_app_passageiro"
+    nome_mod = "AnuncioTelaInicialAppPass"
     bandeira_id, fields, html = carregar_form_bandeira(http)
+    lista = _extrair_lista_js(html, JS_LISTA_PASSAGEIRO)
 
-    _ativar_exibir(fields, prefix, True)
-
-    idxs = _indices_campo(fields, prefix, "url_imagem")
-    if not idxs:
-        idxs = [0]
+    _ativar_exibir(fields, f"{nome_mod}[exibir_anuncio]")
 
     novo_idx: Optional[int] = None
-    for idx in idxs:
-        if not _slot_ocupado(fields, prefix, idx):
+    for idx, item in enumerate(lista):
+        if str(item.get("excluido", "0")) == "1":
+            novo_idx = idx
+            break
+        if not (item.get("url_imagem") or item.get("url_anuncio")):
             novo_idx = idx
             break
 
     if novo_idx is None:
-        if len(idxs) >= 3:
-            return {
-                "sucesso": False,
-                "mensagem": "Limite de 3 anúncios passageiros no painel.",
-            }
-        novo_idx = max(idxs) + 1
+        ativos = [a for a in lista if str(a.get("excluido", "0")) != "1" and a.get("url_imagem")]
+        if len(ativos) >= 3:
+            return {"sucesso": False, "mensagem": "Limite de 3 anúncios passageiros no painel."}
+        novo_idx = len(lista)
 
     url_s3 = upload_imagem_configuracao(http, bandeira_id, img_bytes, "anuncio", "anuncio")
-    _set_field(fields, f"{prefix}_{novo_idx}_url_imagem", url_s3)
-    _set_field(fields, f"{prefix}_{novo_idx}_excluido", "0")
-    _set_field(fields, f"{prefix}_{novo_idx}_url_anuncio", link_limpo)
+    ids = _ids_bandeiras(html, http, selecionar_todas)
+    item_id = str(lista[novo_idx].get("id") or "") if novo_idx < len(lista) else ""
+    _preencher_slot_anuncio(
+        fields, nome_mod, novo_idx, url_s3, link_limpo, ids, item_id=item_id,
+    )
 
-    sel = f"filtro_bandeiras_anuncio_{tipo}_{novo_idx}"
-    _selecionar_todas_bandeiras(fields, html, sel, selecionar_todas)
-
-    salvar_bandeira(http, fields, chave_secreta=chave_secreta, gerar_codigo_fn=gerar_codigo_fn)
+    html_save = salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
+    verif = _verificar_anuncio_salvo(html_save, JS_LISTA_PASSAGEIRO, url_s3, link_limpo)
+    if not verif.get("salvo"):
+        raise RuntimeError(
+            "Upload OK, mas o anúncio passageiro não persistiu no painel após gravar."
+        )
 
     return {
         "sucesso": True,
-        "mensagem": f"Anúncio passageiro configurado via HTTP. URL: {url_s3}",
-        "verificacao": {"dom_slot_idx": novo_idx, "url_imagem": url_s3},
+        "mensagem": f"Anúncio passageiro gravado na Machine. URL: {url_s3}",
+        "verificacao": verif,
     }
 
 
@@ -376,7 +447,6 @@ def criar_campanha_corrida(
     chave_secreta: Optional[str] = None,
     gerar_codigo_fn: Optional[Callable[[str], str]] = None,
 ) -> Dict[str, Any]:
-    prefix = "Campanha"
     if not data_inicio:
         data_inicio = date.today().isoformat()
     if not data_fim:
@@ -388,36 +458,47 @@ def criar_campanha_corrida(
         return {"sucesso": False, "mensagem": "limite_corridas deve ser inteiro positivo."}
 
     bandeira_id, fields, html = carregar_form_bandeira(http)
+    lista = _extrair_lista_js(html, JS_LISTA_CAMPANHA)
 
-    _set_field(fields, f"{prefix}_exibir_campanha_0", "1")
-    _set_field(fields, f"{prefix}_exibir_campanha_1", "0")
-    _set_field(fields, f"{prefix}_exibir_campanha", "0")
-
-    idxs = _indices_campo(fields, prefix, "url_imagem")
-    if not idxs:
-        idxs = [0]
+    _ativar_exibir(fields, "Campanha[exibir_campanha]")
 
     novo_idx: Optional[int] = None
-    for idx in idxs:
-        if not _slot_ocupado(fields, prefix, idx):
+    for idx, item in enumerate(lista):
+        if str(item.get("excluido", "0")) == "1":
+            novo_idx = idx
+            break
+        if not item.get("url_imagem"):
             novo_idx = idx
             break
     if novo_idx is None:
-        novo_idx = max(idxs) + 1
+        novo_idx = len(lista)
 
     url_s3 = upload_imagem_configuracao(http, bandeira_id, img_bytes, "campanha", "campanha")
-    _set_field(fields, f"{prefix}_{novo_idx}_url_imagem", url_s3)
-    _set_field(fields, f"{prefix}_{novo_idx}_excluido", "0")
-    if link_campanha:
-        _set_field(fields, f"{prefix}_{novo_idx}_url_campanha", link_campanha.strip())
-    _set_field(fields, f"{prefix}_{novo_idx}_limite_solicitacoes_finalizadas", limite_str)
-    _set_field(fields, f"{prefix}_{novo_idx}_data_hora_inicio", data_inicio)
-    _set_field(fields, f"{prefix}_{novo_idx}_data_hora_fim", data_fim)
+    ids = _ids_bandeiras(html, http, selecionar_todas)
+    item_id = str(lista[novo_idx].get("id") or "") if novo_idx < len(lista) else ""
+    _preencher_slot_campanha(
+        fields,
+        novo_idx,
+        url_s3,
+        (link_campanha or "").strip(),
+        limite_str,
+        data_inicio,
+        data_fim,
+        ids,
+        item_id=item_id,
+    )
 
-    sel = f"filtro_bandeiras_campanha_{novo_idx}"
-    _selecionar_todas_bandeiras(fields, html, sel, selecionar_todas)
-
-    salvar_bandeira(http, fields, chave_secreta=chave_secreta, gerar_codigo_fn=gerar_codigo_fn)
+    html_save = salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
+    lista_pos = _extrair_lista_js(html_save, JS_LISTA_CAMPANHA)
+    salvo = any(
+        str(c.get("excluido", "0")) != "1"
+        and url_s3.split("/")[-1] in (c.get("url_imagem") or "")
+        for c in lista_pos
+    )
+    if not salvo:
+        raise RuntimeError(
+            "Upload OK, mas a campanha no ciclo da corrida não persistiu após gravar."
+        )
 
     preenchimento = {
         "dom_idx": novo_idx,
@@ -429,8 +510,8 @@ def criar_campanha_corrida(
     }
     return {
         "sucesso": True,
-        "mensagem": f"Campanha no ciclo da corrida gravada via HTTP. URL: {url_s3}",
-        "verificacao": {"preenchimento": preenchimento, "salvo": True, "validado": True},
+        "mensagem": f"Campanha no ciclo da corrida gravada na Machine. URL: {url_s3}",
+        "verificacao": {"preenchimento": preenchimento, "salvo": True, "validado": salvo},
     }
 
 
@@ -439,16 +520,12 @@ def remover_anuncio_motorista(
     chave_secreta: Optional[str] = None,
     gerar_codigo_fn: Optional[Callable[[str], str]] = None,
 ) -> Dict[str, Any]:
-    prefix = "AnuncioAppTaxista"
-    _, fields, _ = carregar_form_bandeira(http)
-
-    idxs = _indices_campo(fields, prefix, "url_imagem")
-    for idx in idxs:
-        if _slot_ocupado(fields, prefix, idx):
-            _set_field(fields, f"{prefix}_{idx}_excluido", "1")
-
-    _ativar_exibir(fields, prefix, False)
-    salvar_bandeira(http, fields, chave_secreta=chave_secreta, gerar_codigo_fn=gerar_codigo_fn)
+    nome_mod = "AnuncioAppTaxista"
+    _, fields, html = carregar_form_bandeira(http)
+    lista = _extrair_lista_js(html, JS_LISTA_MOTORISTA)
+    _marcar_excluidos_lista(fields, nome_mod, lista)
+    _set_field(fields, f"{nome_mod}[exibir_anuncio]", "0")
+    salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
     return {"sucesso": True, "mensagem": "Anúncio motorista removido via HTTP."}
 
 
@@ -458,24 +535,26 @@ def remover_anuncio_passageiro(
     chave_secreta: Optional[str] = None,
     gerar_codigo_fn: Optional[Callable[[str], str]] = None,
 ) -> Dict[str, Any]:
-    prefix = "AnuncioTelaInicialAppPass"
-    _, fields, _ = carregar_form_bandeira(http)
-    idxs = _indices_campo(fields, prefix, "url_imagem")
+    nome_mod = "AnuncioTelaInicialAppPass"
+    _, fields, html = carregar_form_bandeira(http)
+    lista = _extrair_lista_js(html, JS_LISTA_PASSAGEIRO)
 
     if indice is None:
-        for idx in idxs:
-            if _slot_ocupado(fields, prefix, idx):
-                _set_field(fields, f"{prefix}_{idx}_excluido", "1")
+        for idx, item in enumerate(lista):
+            if str(item.get("excluido", "0")) != "1" and item.get("url_imagem"):
+                _set_field(fields, f"{nome_mod}[lista][{idx}][excluido]", "1")
+                if item.get("id"):
+                    _set_field(fields, f"{nome_mod}[lista][{idx}][id]", str(item["id"]))
     else:
         alvo = int(indice)
-        if alvo in idxs:
-            _set_field(fields, f"{prefix}_{alvo}_excluido", "1")
-        elif 0 <= alvo < len(idxs):
-            _set_field(fields, f"{prefix}_{idxs[alvo]}_excluido", "1")
+        if 0 <= alvo < len(lista):
+            _set_field(fields, f"{nome_mod}[lista][{alvo}][excluido]", "1")
+            if lista[alvo].get("id"):
+                _set_field(fields, f"{nome_mod}[lista][{alvo}][id]", str(lista[alvo]["id"]))
         else:
             return {"sucesso": False, "mensagem": f"Índice passageiro {indice} inválido."}
 
-    salvar_bandeira(http, fields, chave_secreta=chave_secreta, gerar_codigo_fn=gerar_codigo_fn)
+    salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
     return {"sucesso": True, "mensagem": "Anúncio(s) passageiro removido(s) via HTTP."}
 
 
@@ -485,25 +564,26 @@ def remover_campanha_corrida(
     chave_secreta: Optional[str] = None,
     gerar_codigo_fn: Optional[Callable[[str], str]] = None,
 ) -> Dict[str, Any]:
-    prefix = "Campanha"
-    _, fields, _ = carregar_form_bandeira(http)
+    _, fields, html = carregar_form_bandeira(http)
+    lista = _extrair_lista_js(html, JS_LISTA_CAMPANHA)
 
     if indice is None:
-        _set_field(fields, f"{prefix}_exibir_campanha_1", "1")
-        _set_field(fields, f"{prefix}_exibir_campanha_0", "0")
-        for idx in _indices_campo(fields, prefix, "url_imagem"):
-            _set_field(fields, f"{prefix}_{idx}_excluido", "1")
+        _set_field(fields, "Campanha[exibir_campanha]", "0")
+        for idx, item in enumerate(lista):
+            if str(item.get("excluido", "0")) != "1":
+                _set_field(fields, f"Campanha[lista][{idx}][excluido]", "1")
+                if item.get("id"):
+                    _set_field(fields, f"Campanha[lista][{idx}][id]", str(item["id"]))
     else:
         alvo = int(indice)
-        idxs = _indices_campo(fields, prefix, "url_imagem")
-        if alvo in idxs:
-            _set_field(fields, f"{prefix}_{alvo}_excluido", "1")
-        elif 0 <= alvo < len(idxs):
-            _set_field(fields, f"{prefix}_{idxs[alvo]}_excluido", "1")
+        if 0 <= alvo < len(lista):
+            _set_field(fields, f"Campanha[lista][{alvo}][excluido]", "1")
+            if lista[alvo].get("id"):
+                _set_field(fields, f"Campanha[lista][{alvo}][id]", str(lista[alvo]["id"]))
         else:
             return {"sucesso": False, "mensagem": f"Índice campanha {indice} inválido."}
 
-    salvar_bandeira(http, fields, chave_secreta=chave_secreta, gerar_codigo_fn=gerar_codigo_fn)
+    salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
     return {"sucesso": True, "mensagem": "Campanha corrida removida/desativada via HTTP."}
 
 
@@ -534,6 +614,33 @@ def _resultado_base(email: str, login: Dict[str, Any], inner: Dict[str, Any]) ->
     return out
 
 
+def _executar_criar(
+    email: str,
+    senha: str,
+    chave_secreta: Optional[str],
+    imagem_path: str,
+    criar_fn: Callable[..., Dict[str, Any]],
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    from auto_2fa import gerar_codigo
+
+    with open(imagem_path, "rb") as fh:
+        img = fh.read()
+    http, login = _login_e_sessao(email, senha, chave_secreta)
+    chave = (chave_secreta or login.get("chave_totp") or "").replace(" ", "")
+    try:
+        r = criar_fn(
+            http,
+            img,
+            chave_secreta=chave or None,
+            gerar_codigo_fn=gerar_codigo,
+            **kwargs,
+        )
+    except RuntimeError as e:
+        return _resultado_base(email, login, {"sucesso": False, "mensagem": str(e)})
+    return _resultado_base(email, login, r)
+
+
 def executar_adicionar_anuncio_motorista_http(
     email: str,
     senha: str,
@@ -543,17 +650,10 @@ def executar_adicionar_anuncio_motorista_http(
     selecionar_todas: bool = True,
     **_: Any,
 ) -> Dict[str, Any]:
-    from auto_2fa import gerar_codigo
-
-    with open(imagem_path, "rb") as fh:
-        img = fh.read()
-    http, login = _login_e_sessao(email, senha, chave_secreta)
-    chave = (chave_secreta or login.get("chave_totp") or "").replace(" ", "")
-    r = criar_anuncio_motorista(
-        http, img, link_anuncio, selecionar_todas,
-        chave_secreta=chave or None, gerar_codigo_fn=gerar_codigo,
+    return _executar_criar(
+        email, senha, chave_secreta, imagem_path, criar_anuncio_motorista,
+        link_anuncio=link_anuncio, selecionar_todas=selecionar_todas,
     )
-    return _resultado_base(email, login, r)
 
 
 def executar_adicionar_anuncio_passageiro_http(
@@ -565,17 +665,10 @@ def executar_adicionar_anuncio_passageiro_http(
     selecionar_todas: bool = True,
     **_: Any,
 ) -> Dict[str, Any]:
-    from auto_2fa import gerar_codigo
-
-    with open(imagem_path, "rb") as fh:
-        img = fh.read()
-    http, login = _login_e_sessao(email, senha, chave_secreta)
-    chave = (chave_secreta or login.get("chave_totp") or "").replace(" ", "")
-    r = criar_anuncio_passageiro(
-        http, img, link_anuncio, selecionar_todas,
-        chave_secreta=chave or None, gerar_codigo_fn=gerar_codigo,
+    return _executar_criar(
+        email, senha, chave_secreta, imagem_path, criar_anuncio_passageiro,
+        link_anuncio=link_anuncio, selecionar_todas=selecionar_todas,
     )
-    return _resultado_base(email, login, r)
 
 
 def executar_adicionar_campanha_corrida_http(
@@ -590,18 +683,14 @@ def executar_adicionar_campanha_corrida_http(
     data_fim: Optional[str] = None,
     **_: Any,
 ) -> Dict[str, Any]:
-    from auto_2fa import gerar_codigo
-
-    with open(imagem_path, "rb") as fh:
-        img = fh.read()
-    http, login = _login_e_sessao(email, senha, chave_secreta)
-    chave = (chave_secreta or login.get("chave_totp") or "").replace(" ", "")
-    r = criar_campanha_corrida(
-        http, img, link_campanha, selecionar_todas, limite_corridas,
-        data_inicio, data_fim,
-        chave_secreta=chave or None, gerar_codigo_fn=gerar_codigo,
+    return _executar_criar(
+        email, senha, chave_secreta, imagem_path, criar_campanha_corrida,
+        link_campanha=link_campanha,
+        selecionar_todas=selecionar_todas,
+        limite_corridas=limite_corridas,
+        data_inicio=data_inicio,
+        data_fim=data_fim,
     )
-    return _resultado_base(email, login, r)
 
 
 def executar_remover_anuncio_motorista_http(
@@ -614,7 +703,10 @@ def executar_remover_anuncio_motorista_http(
 
     http, login = _login_e_sessao(email, senha, chave_secreta)
     chave = (chave_secreta or login.get("chave_totp") or "").replace(" ", "")
-    r = remover_anuncio_motorista(http, chave_secreta=chave or None, gerar_codigo_fn=gerar_codigo)
+    try:
+        r = remover_anuncio_motorista(http, chave_secreta=chave or None, gerar_codigo_fn=gerar_codigo)
+    except RuntimeError as e:
+        return _resultado_base(email, login, {"sucesso": False, "mensagem": str(e)})
     return _resultado_base(email, login, r)
 
 
@@ -629,9 +721,12 @@ def executar_remover_anuncio_passageiro_http(
 
     http, login = _login_e_sessao(email, senha, chave_secreta)
     chave = (chave_secreta or login.get("chave_totp") or "").replace(" ", "")
-    r = remover_anuncio_passageiro(
-        http, indice=indice, chave_secreta=chave or None, gerar_codigo_fn=gerar_codigo,
-    )
+    try:
+        r = remover_anuncio_passageiro(
+            http, indice=indice, chave_secreta=chave or None, gerar_codigo_fn=gerar_codigo,
+        )
+    except RuntimeError as e:
+        return _resultado_base(email, login, {"sucesso": False, "mensagem": str(e)})
     return _resultado_base(email, login, r)
 
 
@@ -646,7 +741,10 @@ def executar_remover_campanha_corrida_http(
 
     http, login = _login_e_sessao(email, senha, chave_secreta)
     chave = (chave_secreta or login.get("chave_totp") or "").replace(" ", "")
-    r = remover_campanha_corrida(
-        http, indice=indice, chave_secreta=chave or None, gerar_codigo_fn=gerar_codigo,
-    )
+    try:
+        r = remover_campanha_corrida(
+            http, indice=indice, chave_secreta=chave or None, gerar_codigo_fn=gerar_codigo,
+        )
+    except RuntimeError as e:
+        return _resultado_base(email, login, {"sucesso": False, "mensagem": str(e)})
     return _resultado_base(email, login, r)

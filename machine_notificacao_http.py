@@ -223,13 +223,34 @@ def login_painel(
             timeout=30,
         )
         data = _parse_json_response(r)
+        chave_registrada: Optional[str] = None
 
         if data.get("cadastrar2FA"):
-            raise RuntimeError(
-                "Conta exige cadastro de 2FA no painel antes do login HTTP."
-            )
+            auth2f = data.get("autenticacao2Fatores") or {}
+            secret = str(auth2f.get("secret") or "").replace(" ", "")
+            if not secret:
+                raise RuntimeError(
+                    "Cadastro 2FA exigido, mas o painel não retornou o segredo TOTP."
+                )
+            if not gerar_codigo_fn:
+                from auto_2fa import gerar_codigo as _gerar
 
-        if data.get("solicitarCodigo2FA"):
+                gerar_codigo_fn = _gerar
+            code = gerar_codigo_fn(secret)
+            r_reg = http.post(
+                BASE_URL + "/site/validarCadastro2FA",
+                data={"code": code},
+                headers={"Referer": BASE_URL + "/"},
+                timeout=30,
+            )
+            data_reg = _parse_json_response(r_reg)
+            if not data_reg.get("success"):
+                msg = data_reg.get("message") or "Falha ao validar cadastro 2FA via HTTP."
+                raise RuntimeError(msg)
+            chave_registrada = secret
+            log.info("2FA registrado via HTTP (validarCadastro2FA) para %s", email)
+
+        elif data.get("solicitarCodigo2FA"):
             code = codigo_2fa
             if not code and chave_secreta and gerar_codigo_fn:
                 code = gerar_codigo_fn(chave_secreta)
@@ -263,7 +284,15 @@ def login_painel(
         bandeiras = obter_bandeiras(http)
         phpsessid = http.cookies.get("PHPSESSID", "")
 
-        return {
+        chave_totp = chave_registrada or (chave_secreta or "").replace(" ", "") or None
+        if not chave_totp and gerar_codigo_fn:
+            from auto_2fa import obter_chave
+
+            salva = obter_chave(email)
+            if salva:
+                chave_totp = salva
+
+        out: Dict[str, Any] = {
             "sucesso": True,
             "email": email,
             "session_token": token,
@@ -271,6 +300,9 @@ def login_painel(
             "bandeiras": bandeiras,
             "mensagem": "Login HTTP no painel concluído.",
         }
+        if chave_totp:
+            out["chave_totp"] = chave_totp
+        return out
     except Exception:
         with _sessions_lock:
             _sessions.pop(token, None)
