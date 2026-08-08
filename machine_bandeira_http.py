@@ -287,6 +287,8 @@ def _preencher_slot_anuncio(
     bandeira_ids: List[str],
     item_id: str = "",
     excluido: str = "0",
+    bandeira_id: str = "",
+    tipo_anuncio: str = "tela_inicial_app_passageiro",
 ) -> None:
     base = f"{nome_mod}[lista][{idx}]"
     _set_field(fields, f"{base}[url_imagem]", url_imagem)
@@ -294,6 +296,10 @@ def _preencher_slot_anuncio(
     _set_field(fields, f"{base}[excluido]", excluido)
     _set_field(fields, f"{base}[ativo]", "1")
     _set_field(fields, f"{base}[id]", item_id)
+    if bandeira_id:
+        _set_field(fields, f"{base}[bandeira_id]", str(bandeira_id))
+    if tipo_anuncio:
+        _set_field(fields, f"{base}[tipo_anuncio]", tipo_anuncio)
     if bandeira_ids:
         fields[f"{base}[bandeiras][]"] = list(bandeira_ids)
 
@@ -303,8 +309,9 @@ def _mesclar_lista_anuncios_no_form(
     nome_mod: str,
     lista: List[Dict[str, Any]],
     idx_editar: int,
+    bandeira_id: str = "",
 ) -> None:
-    """Preserva anúncios existentes no POST ao editar/adicionar um slot."""
+    """Preserva anúncios existentes no POST ao adicionar um slot novo."""
     for idx, item in enumerate(lista):
         if idx == idx_editar:
             continue
@@ -317,9 +324,13 @@ def _mesclar_lista_anuncios_no_form(
         _set_field(fields, f"{base}[url_imagem]", (item.get("url_imagem") or "").strip())
         _set_field(fields, f"{base}[url_anuncio]", (item.get("url_anuncio") or "").strip())
         _set_field(fields, f"{base}[excluido]", "0")
-        _set_field(fields, f"{base}[ativo]", "1")
+        _set_field(fields, f"{base}[ativo]", str(item.get("ativo") or "1"))
         if item.get("id"):
             _set_field(fields, f"{base}[id]", str(item["id"]))
+        if item.get("bandeira_id") or bandeira_id:
+            _set_field(fields, f"{base}[bandeira_id]", str(item.get("bandeira_id") or bandeira_id))
+        if item.get("tipo_anuncio"):
+            _set_field(fields, f"{base}[tipo_anuncio]", str(item["tipo_anuncio"]))
         bs = item.get("bandeiras") or []
         if bs:
             fields[f"{base}[bandeiras][]"] = [str(b) for b in bs]
@@ -328,22 +339,11 @@ def _mesclar_lista_anuncios_no_form(
 def _escolher_slot_passageiro(
     lista: List[Dict[str, Any]],
     html: str,
-    bandeira_ids: Optional[List[str]] = None,
 ) -> Tuple[Optional[int], Optional[str]]:
     """
-    Escolhe índice para gravar anúncio passageiro.
-    Prioridade: slot da bandeira alvo → slot vazio → novo índice (até max do painel).
+    Escolhe índice para um anúncio passageiro NOVO.
+    Nunca reutiliza slot de bandeira existente — só slot vazio ou append (adicionarNovoAnuncio).
     """
-    alvo = {str(b) for b in (bandeira_ids or []) if str(b).strip()}
-
-    if alvo:
-        for idx, item in enumerate(lista):
-            if str(item.get("excluido", "0")) == "1":
-                continue
-            bs = {str(b) for b in (item.get("bandeiras") or [])}
-            if bs & alvo:
-                return idx, "bandeira"
-
     for idx, item in enumerate(lista):
         if str(item.get("excluido", "0")) == "1":
             return idx, "excluido"
@@ -423,6 +423,45 @@ def _verificar_anuncio_salvo(
     return {"salvo": False, "validado": False, "lista": lista}
 
 
+def _confirmar_persistencia_passageiro(
+    http: requests.Session,
+    url_esperada: str,
+    link_esperado: str,
+    idx_esperado: int,
+    qtd_antes: int,
+) -> Dict[str, Any]:
+    """Confirma persistência com GET real (POST response pode mentir)."""
+    r = http.get(BASE_URL + "/bandeira/update", timeout=120)
+    lista = _extrair_lista_js(r.text or "", JS_LISTA_PASSAGEIRO)
+    link_norm = (link_esperado or "").strip().rstrip("/").lower()
+    nome_arquivo = url_esperada.split("/")[-1]
+
+    for i, a in enumerate(lista):
+        if str(a.get("excluido", "0")) == "1":
+            continue
+        url = (a.get("url_imagem") or "").strip()
+        link = (a.get("url_anuncio") or "").strip().rstrip("/").lower()
+        img_ok = nome_arquivo in url or url == url_esperada
+        link_ok = not link_norm or link == link_norm or link_norm in link
+        if img_ok and link_ok:
+            return {
+                "salvo": True,
+                "validado": True,
+                "dom_slot_idx": i,
+                "url_imagem": url,
+                "bandeiras": a.get("bandeiras") or [],
+                "lista_total": len(lista),
+            }
+
+    return {
+        "salvo": False,
+        "validado": False,
+        "dom_slot_idx": idx_esperado,
+        "lista_total": len(lista),
+        "qtd_antes": qtd_antes,
+    }
+
+
 def criar_anuncio_motorista(
     http: requests.Session,
     img_bytes: bytes,
@@ -478,7 +517,7 @@ def criar_anuncio_passageiro(
 
     _ativar_exibir(fields, f"{nome_mod}[exibir_anuncio]")
 
-    novo_idx, modo = _escolher_slot_passageiro(lista, html, bandeira_ids)
+    novo_idx, modo = _escolher_slot_passageiro(lista, html)
     if novo_idx is None:
         return {"sucesso": False, "mensagem": str(modo)}
 
@@ -490,17 +529,21 @@ def criar_anuncio_passageiro(
             "mensagem": "Informe bandeira_ids ou selecionar_todas=true.",
         }
 
-    _mesclar_lista_anuncios_no_form(fields, nome_mod, lista, novo_idx)
+    _mesclar_lista_anuncios_no_form(fields, nome_mod, lista, novo_idx, bandeira_id)
     item_id = str(lista[novo_idx].get("id") or "") if novo_idx < len(lista) else ""
     _preencher_slot_anuncio(
-        fields, nome_mod, novo_idx, url_s3, link_limpo, ids, item_id=item_id,
+        fields, nome_mod, novo_idx, url_s3, link_limpo, ids,
+        item_id=item_id, bandeira_id=bandeira_id,
     )
 
     html_save = salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
-    verif = _verificar_anuncio_salvo(html_save, JS_LISTA_PASSAGEIRO, url_s3, link_limpo)
+    verif = _confirmar_persistencia_passageiro(
+        http, url_s3, link_limpo, novo_idx, len(lista),
+    )
     if not verif.get("salvo"):
         raise RuntimeError(
-            "Upload OK, mas o anúncio passageiro não persistiu no painel após gravar."
+            "Upload OK, mas o anúncio passageiro não persistiu no painel após gravar "
+            f"(slot {novo_idx}, modo {modo})."
         )
 
     return {
