@@ -854,7 +854,11 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "git_sha": os.environ.get("GIT_SHA", "local"),
+        "banner_http_form_completo": os.environ.get("BANNER_HTTP_FORM_COMPLETO") == "1",
+    }
 
 
 def _notificacao_http_erro(exc: Exception) -> HTTPException:

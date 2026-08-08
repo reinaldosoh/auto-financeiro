@@ -679,14 +679,21 @@ def criar_anuncio_passageiro(
         item_id=item_id,
     )
 
+    form_pares = sum(len(v) for v in fields.values())
     html_save = salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
     verif = _confirmar_persistencia_passageiro(
         http, url_s3, link_limpo, novo_idx, len(lista),
     )
     if not verif.get("salvo"):
+        dica = (
+            " Redeploy a VPS (ghcr.io/reinaldosoh/auto-financeiro:latest) — "
+            "form incompleto (<450 pares) não persiste no painel."
+            if form_pares < 450
+            else ""
+        )
         raise RuntimeError(
             "Upload OK, mas o anúncio passageiro não persistiu no painel após gravar "
-            f"(slot {novo_idx}, modo {modo})."
+            f"(slot {novo_idx}, modo {modo}, form_pares={form_pares}).{dica}"
         )
 
     return {
