@@ -186,6 +186,66 @@ def _aplicar_item_lista_anuncio(
         fields[f"{base}[bandeiras][]"] = [str(b) for b in bs]
 
 
+def _limpar_formato_lista_motorista(fields: Dict[str, List[str]]) -> None:
+    """Motorista usa AnuncioAppTaxista_{idx}_*, não [lista][idx]."""
+    for k in list(fields.keys()):
+        if k.startswith("AnuncioAppTaxista[lista]"):
+            del fields[k]
+
+
+def _aplicar_item_motorista(
+    fields: Dict[str, List[str]],
+    idx: int,
+    item: Dict[str, Any],
+) -> None:
+    """Campos flat do painel: AnuncioAppTaxista_{idx}_url_imagem etc."""
+    prefix = f"AnuncioAppTaxista_{idx}"
+    filtro = f"filtro_bandeiras_anuncio_tela_inicial_app_taxista_{idx}"
+    for k in (
+        f"{prefix}_url_imagem",
+        f"{prefix}_url_anuncio",
+        f"{prefix}_excluido",
+        f"{prefix}_id",
+        f"{filtro}[]",
+    ):
+        fields.pop(k, None)
+    if str(item.get("excluido", "0")) == "1":
+        _set_field(fields, f"{prefix}_excluido", "1")
+        if item.get("id"):
+            _set_field(fields, f"{prefix}_id", str(item["id"]))
+        return
+    _set_field(fields, f"{prefix}_url_imagem", (item.get("url_imagem") or "").strip())
+    _set_field(fields, f"{prefix}_excluido", str(item.get("excluido") or "0"))
+    if item.get("id"):
+        _set_field(fields, f"{prefix}_id", str(item["id"]))
+    if item.get("url_anuncio"):
+        _set_field(fields, f"{prefix}_url_anuncio", str(item["url_anuncio"]).strip())
+    bs = item.get("bandeiras") or []
+    if bs:
+        fields[f"{filtro}[]"] = [str(b) for b in bs]
+
+
+def _preencher_slot_motorista(
+    fields: Dict[str, List[str]],
+    idx: int,
+    url_imagem: str,
+    link: str,
+    bandeira_ids: List[str],
+    excluido: str = "0",
+    item_id: str = "",
+) -> None:
+    prefix = f"AnuncioAppTaxista_{idx}"
+    filtro = f"filtro_bandeiras_anuncio_tela_inicial_app_taxista_{idx}"
+    _set_field(fields, f"{prefix}_url_imagem", url_imagem)
+    _set_field(fields, f"{prefix}_excluido", excluido)
+    if link:
+        _set_field(fields, f"{prefix}_url_anuncio", link.strip())
+    if item_id:
+        _set_field(fields, f"{prefix}_id", item_id)
+    if bandeira_ids:
+        fields[f"{filtro}[]"] = [str(b) for b in bandeira_ids if str(b).strip()]
+
+
 def _mesclar_listas_recursos_premium(fields: Dict[str, List[str]], html: str) -> None:
     """Replica campos dinâmicos de anúncios/campanhas a partir das variáveis JS."""
     lista_pass = _extrair_lista_js(html, JS_LISTA_PASSAGEIRO)
@@ -608,38 +668,132 @@ def _confirmar_persistencia_passageiro(
     }
 
 
+def _confirmar_persistencia_motorista(
+    http: requests.Session,
+    url_esperada: str,
+    idx_esperado: int,
+) -> Dict[str, Any]:
+    """Confirma persistência com GET real; rejeita URL /tmp/."""
+    r = http.get(BASE_URL + "/bandeira/update", timeout=120)
+    lista = _extrair_lista_js(r.text or "", JS_LISTA_MOTORISTA)
+    nome_arquivo = url_esperada.split("/")[-1]
+
+    for i, a in enumerate(lista):
+        if str(a.get("excluido", "0")) == "1":
+            continue
+        url = (a.get("url_imagem") or "").strip()
+        if not url or "/tmp/" in url:
+            continue
+        permanente = "/upload/anuncios/bandeira/" in url and "/tmp/" not in url
+        if permanente or nome_arquivo in url:
+            return {
+                "salvo": True,
+                "validado": True,
+                "dom_slot_idx": i,
+                "url_imagem": url,
+                "bandeiras": a.get("bandeiras") or [],
+                "lista_total": len(lista),
+            }
+
+    if 0 <= idx_esperado < len(lista):
+        a = lista[idx_esperado]
+        url = (a.get("url_imagem") or "").strip()
+        if str(a.get("excluido", "0")) != "1" and url and "/tmp/" not in url:
+            return {
+                "salvo": True,
+                "validado": True,
+                "dom_slot_idx": idx_esperado,
+                "url_imagem": url,
+                "bandeiras": a.get("bandeiras") or [],
+                "lista_total": len(lista),
+            }
+
+    return {
+        "salvo": False,
+        "validado": False,
+        "dom_slot_idx": idx_esperado,
+        "lista_total": len(lista),
+    }
+
+
+def _confirmar_remocao_motorista(http: requests.Session) -> Dict[str, Any]:
+    r = http.get(BASE_URL + "/bandeira/update", timeout=120)
+    lista = _extrair_lista_js(r.text or "", JS_LISTA_MOTORISTA)
+    ativos = [
+        i for i, a in enumerate(lista)
+        if str(a.get("excluido", "0")) != "1" and (a.get("url_imagem") or "").strip()
+    ]
+    return {
+        "removido": len(ativos) == 0,
+        "ativos_restantes": len(ativos),
+        "lista_total": len(lista),
+    }
+
+
 def criar_anuncio_motorista(
     http: requests.Session,
     img_bytes: bytes,
     link_anuncio: str = "",
     selecionar_todas: bool = True,
+    bandeira_ids: Optional[List[str]] = None,
     chave_secreta: Optional[str] = None,
     gerar_codigo_fn: Optional[Callable[[str], str]] = None,
 ) -> Dict[str, Any]:
     nome_mod = "AnuncioAppTaxista"
     bandeira_id, fields, html = carregar_form_bandeira(http)
     lista = _extrair_lista_js(html, JS_LISTA_MOTORISTA)
-
+    _limpar_formato_lista_motorista(fields)
     _ativar_exibir(fields, f"{nome_mod}[exibir_anuncio]")
-    _marcar_excluidos_lista(fields, nome_mod, lista)
 
-    novo_idx = len(lista) if lista else 0
+    ids = _ids_bandeiras(html, http, selecionar_todas, bandeira_ids)
+    if not ids and not selecionar_todas:
+        return {
+            "sucesso": False,
+            "mensagem": "Informe bandeira_ids ou selecionar_todas=true.",
+        }
+
+    tem_ativo = any(
+        str(a.get("excluido", "0")) != "1" and (a.get("url_imagem") or "").strip()
+        for a in lista
+    )
+    if tem_ativo and lista:
+        antigo = dict(lista[0])
+        antigo["excluido"] = "1"
+        _aplicar_item_lista_anuncio(fields, nome_mod, 0, antigo)
+        novo_idx = 1
+        item_id = ""
+    else:
+        novo_idx = 0
+        item_id = ""
+
     url_s3 = upload_imagem_configuracao(http, bandeira_id, img_bytes, "anuncio", "anuncio")
-    ids = _ids_bandeiras(html, http, selecionar_todas)
     _preencher_slot_anuncio(
-        fields, nome_mod, novo_idx, url_s3, (link_anuncio or "").strip(), ids,
+        fields,
+        nome_mod,
+        novo_idx,
+        url_s3,
+        (link_anuncio or "").strip(),
+        ids,
+        item_id=item_id,
     )
 
-    html_save = salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
-    verif = _verificar_anuncio_salvo(html_save, JS_LISTA_MOTORISTA, url_s3, link_anuncio)
+    form_pares = sum(len(v) for v in fields.values())
+    salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
+    verif = _confirmar_persistencia_motorista(http, url_s3, novo_idx)
     if not verif.get("salvo"):
+        dica = (
+            " Redeploy a VPS com banner_http_form_completo=true."
+            if form_pares < 450
+            else ""
+        )
         raise RuntimeError(
-            "Upload OK, mas o anúncio motorista não persistiu no painel após gravar."
+            "Upload OK, mas o anúncio motorista não persistiu no painel após gravar "
+            f"(slot {novo_idx}, form_pares={form_pares}).{dica}"
         )
 
     return {
         "sucesso": True,
-        "mensagem": f"Anúncio motorista gravado na Machine. URL: {url_s3}",
+        "mensagem": f"Anúncio motorista gravado na Machine (slot {novo_idx}). URL: {verif.get('url_imagem') or url_s3}",
         "verificacao": verif,
     }
 
@@ -831,10 +985,18 @@ def remover_anuncio_motorista(
     nome_mod = "AnuncioAppTaxista"
     _, fields, html = carregar_form_bandeira(http)
     lista = _extrair_lista_js(html, JS_LISTA_MOTORISTA)
+    _limpar_formato_lista_motorista(fields)
     _marcar_excluidos_lista(fields, nome_mod, lista)
     _set_field(fields, f"{nome_mod}[exibir_anuncio]", "0")
+    form_pares = sum(len(v) for v in fields.values())
     salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
-    return {"sucesso": True, "mensagem": "Anúncio motorista removido via HTTP."}
+    verif = _confirmar_remocao_motorista(http)
+    if not verif.get("removido"):
+        raise RuntimeError(
+            f"Remoção motorista não persistiu (ainda {verif.get('ativos_restantes')} ativo(s), "
+            f"form_pares={form_pares})."
+        )
+    return {"sucesso": True, "mensagem": "Anúncio motorista removido via HTTP.", "verificacao": verif}
 
 
 def remover_anuncio_passageiro(
@@ -977,11 +1139,14 @@ def executar_adicionar_anuncio_motorista_http(
     imagem_path: str,
     link_anuncio: str = "",
     selecionar_todas: bool = True,
+    bandeira_ids: Optional[List[str]] = None,
     **_: Any,
 ) -> Dict[str, Any]:
     return _executar_criar(
         email, senha, chave_secreta, imagem_path, criar_anuncio_motorista,
-        link_anuncio=link_anuncio, selecionar_todas=selecionar_todas,
+        link_anuncio=link_anuncio,
+        selecionar_todas=selecionar_todas,
+        bandeira_ids=bandeira_ids,
     )
 
 

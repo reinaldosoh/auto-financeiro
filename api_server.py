@@ -541,7 +541,8 @@ async def anuncio_motorista(input_data: AnuncioMotoristaInput):
         manter_aberto=input_data.manter_aberto,
         imagem_path=tmp_imagem_path,
         link_anuncio=input_data.link_anuncio,
-        selecionar_todas=input_data.selecionar_todas
+        selecionar_todas=input_data.selecionar_todas,
+        bandeira_ids=input_data.bandeira_ids,
     )
 
     try:
