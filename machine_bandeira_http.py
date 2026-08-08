@@ -782,6 +782,47 @@ def criar_campanha_corrida(
     }
 
 
+def _confirmar_remocao_passageiro(
+    http: requests.Session,
+    indices: Optional[List[int]] = None,
+) -> Dict[str, Any]:
+    """Confirma exclusão com GET real (POST response pode mentir)."""
+    r = http.get(BASE_URL + "/bandeira/update", timeout=120)
+    lista = _extrair_lista_js(r.text or "", JS_LISTA_PASSAGEIRO)
+    if indices is None:
+        ativos = [
+            i
+            for i, a in enumerate(lista)
+            if str(a.get("excluido", "0")) != "1" and (a.get("url_imagem") or "").strip()
+        ]
+        return {
+            "removido": len(ativos) == 0,
+            "ativos_restantes": len(ativos),
+            "lista_total": len(lista),
+        }
+    ok = all(
+        0 <= i < len(lista) and str(lista[i].get("excluido", "0")) == "1"
+        for i in indices
+    )
+    return {"removido": ok, "indices": indices, "lista_total": len(lista)}
+
+
+def _marcar_slots_excluidos_passageiro(
+    fields: Dict[str, List[str]],
+    nome_mod: str,
+    lista: List[Dict[str, Any]],
+    indices: List[int],
+) -> None:
+    """Mescla a lista inteira no POST e marca slot(s) com excluido=1."""
+    _ativar_exibir(fields, f"{nome_mod}[exibir_anuncio]")
+    alvos = set(indices)
+    for idx, item in enumerate(lista):
+        copia = dict(item)
+        if idx in alvos:
+            copia["excluido"] = "1"
+        _aplicar_item_lista_anuncio(fields, nome_mod, idx, copia)
+
+
 def remover_anuncio_motorista(
     http: requests.Session,
     chave_secreta: Optional[str] = None,
@@ -807,22 +848,43 @@ def remover_anuncio_passageiro(
     lista = _extrair_lista_js(html, JS_LISTA_PASSAGEIRO)
 
     if indice is None:
-        for idx, item in enumerate(lista):
-            if str(item.get("excluido", "0")) != "1" and item.get("url_imagem"):
-                _set_field(fields, f"{nome_mod}[lista][{idx}][excluido]", "1")
-                if item.get("id"):
-                    _set_field(fields, f"{nome_mod}[lista][{idx}][id]", str(item["id"]))
+        indices = [
+            idx
+            for idx, item in enumerate(lista)
+            if str(item.get("excluido", "0")) != "1" and (item.get("url_imagem") or "").strip()
+        ]
+        if not indices:
+            return {"sucesso": True, "mensagem": "Nenhum anúncio passageiro ativo para remover."}
     else:
         alvo = int(indice)
-        if 0 <= alvo < len(lista):
-            _set_field(fields, f"{nome_mod}[lista][{alvo}][excluido]", "1")
-            if lista[alvo].get("id"):
-                _set_field(fields, f"{nome_mod}[lista][{alvo}][id]", str(lista[alvo]["id"]))
-        else:
+        if alvo < 0 or alvo >= len(lista):
             return {"sucesso": False, "mensagem": f"Índice passageiro {indice} inválido."}
+        if str(lista[alvo].get("excluido", "0")) == "1":
+            return {
+                "sucesso": True,
+                "mensagem": f"Slot passageiro {alvo} já estava excluído.",
+                "verificacao": {"removido": True, "indices": [alvo]},
+            }
+        indices = [alvo]
 
+    _marcar_slots_excluidos_passageiro(fields, nome_mod, lista, indices)
+    form_pares = sum(len(v) for v in fields.values())
     salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
-    return {"sucesso": True, "mensagem": "Anúncio(s) passageiro removido(s) via HTTP."}
+    verif = _confirmar_remocao_passageiro(http, indices)
+    if not verif.get("removido"):
+        dica = (
+            " Redeploy a VPS com banner_http_form_completo=true."
+            if form_pares < 450
+            else ""
+        )
+        raise RuntimeError(
+            f"Remoção não persistiu no painel (slots {indices}, form_pares={form_pares}).{dica}"
+        )
+    return {
+        "sucesso": True,
+        "mensagem": f"Anúncio(s) passageiro removido(s) via HTTP (slots {indices}).",
+        "verificacao": verif,
+    }
 
 
 def remover_campanha_corrida(
