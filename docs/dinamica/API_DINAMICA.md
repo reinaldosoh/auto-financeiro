@@ -272,6 +272,12 @@ Commit `094333d` no GitHub (`reinaldosoh/auto-financeiro`). Após push, **redepl
 
 ---
 
+## n8n
+
+Workflows importáveis e guia de nós HTTP: [`n8n/N8N_DINAMICA.md`](./n8n/N8N_DINAMICA.md)
+
+---
+
 ## Documentação Lovable (migração Selenium → API)
 
 Guias passo a passo por função da tela `/dinamica`:

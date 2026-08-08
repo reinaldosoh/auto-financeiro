@@ -1,0 +1,53 @@
+{
+  "capturado_em": "2026-08-08T01:04:52Z",
+  "conta": "radar2@gmail.com",
+  "bandeiraId": 1875,
+  "lista_antes": 3,
+  "novo_idx": 3,
+  "total_form_pairs": 468,
+  "bandeira_unique_keys": 107,
+  "exibir_anuncio": ["", "1"],
+  "anuncio_pairs": [
+    ["AnuncioTelaInicialAppPass[exibir_anuncio]", ""],
+    ["AnuncioTelaInicialAppPass[exibir_anuncio]", "1"],
+    ["AnuncioTelaInicialAppPass[lista][0][url_imagem]", "https://asset-cnt.taximachine.com.br/upload/anuncios/bandeira/1875/anuncio_6038235153.jpg"],
+    ["AnuncioTelaInicialAppPass[lista][0][id]", "3525"],
+    ["AnuncioTelaInicialAppPass[lista][0][excluido]", "0"],
+    ["AnuncioTelaInicialAppPass[lista][0][bandeiras][]", "3615"],
+    ["AnuncioTelaInicialAppPass[lista][0][bandeiras][]", "5272"],
+    ["AnuncioTelaInicialAppPass[lista][0][bandeiras][]", "5575"],
+    ["AnuncioTelaInicialAppPass[lista][0][ativo]", "1"],
+    ["AnuncioTelaInicialAppPass[lista][1][url_imagem]", "https://asset-cnt.taximachine.com.br/upload/anuncios/bandeira/1875/anuncio_4481671071.jpg"],
+    ["AnuncioTelaInicialAppPass[lista][1][id]", "4910"],
+    ["AnuncioTelaInicialAppPass[lista][1][excluido]", "0"],
+    ["AnuncioTelaInicialAppPass[lista][1][bandeiras][]", "2014"],
+    ["AnuncioTelaInicialAppPass[lista][1][ativo]", "1"],
+    ["AnuncioTelaInicialAppPass[lista][2][url_imagem]", "https://asset-cnt.taximachine.com.br/upload/anuncios/bandeira/1875/anuncio_7789395971.jpg"],
+    ["AnuncioTelaInicialAppPass[lista][2][id]", "5487"],
+    ["AnuncioTelaInicialAppPass[lista][2][excluido]", "0"],
+    ["AnuncioTelaInicialAppPass[lista][2][bandeiras][]", "3586"],
+    ["AnuncioTelaInicialAppPass[lista][2][ativo]", "1"],
+    ["AnuncioTelaInicialAppPass[lista][3][url_imagem]", "https://asset-cnt.taximachine.com.br/upload/anuncios/tmp/bandeira/1875/2026/08/08/010452q67nzxZs4.jpg"],
+    ["AnuncioTelaInicialAppPass[lista][3][id]", ""],
+    ["AnuncioTelaInicialAppPass[lista][3][excluido]", "0"],
+    ["AnuncioTelaInicialAppPass[lista][3][url_anuncio]", "https://teste-browser-capture.ubizcar.com.br/promo"],
+    ["AnuncioTelaInicialAppPass[lista][3][bandeiras][]", "2014"],
+    ["AnuncioTelaInicialAppPass[lista][3][ativo]", "1"]
+  ],
+  "observacoes": [
+    "Slots 0-2 NÃO enviam url_anuncio (campo disabled no painel)",
+    "Slot novo envia id vazio (string vazia), não omitido",
+    "Não existem bandeira_id nem tipo_anuncio no POST",
+    "yt1=Gravar só entra no POST ao clicar submit (não aparece no FormData estático)",
+    "Após Gravar no browser, GET confirmou 4 anúncios — novo id=5494, imagem permanente anuncio_3422237510.jpg",
+    "Form completo do browser: 468 pares / 335 chaves únicas; parser HTTP atual: 417 valores / 295 chaves",
+    "Faltam ~56 chaves no HTTP (BandeiraDocumento, MensagemPersonalizada, despacho, AnuncioAppTaxista, Campanha, etc.)"
+  ],
+  "persistencia_pos_save": {
+    "sucesso": true,
+    "lista_total": 4,
+    "novo_id": "5494",
+    "url_imagem_permanente": "https://asset-cnt.taximachine.com.br/upload/anuncios/bandeira/1875/anuncio_3422237510.jpg",
+    "url_anuncio": "https://teste-browser-capture.ubizcar.com.br/promo"
+  }
+}

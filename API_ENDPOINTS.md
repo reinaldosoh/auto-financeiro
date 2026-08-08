@@ -4,6 +4,8 @@ Substitua `BASE_URL` pela URL pública do serviço (ex.: `https://seu-dominio.co
 
 Documentação interativa: **`GET {BASE_URL}/docs`** (Swagger UI).
 
+**Guia para outro time (banners via HTTP + 2FA, sem Selenium):** [`docs/banners/GUIA_INTEGRACAO_BANNERS_HTTP.md`](docs/banners/GUIA_INTEGRACAO_BANNERS_HTTP.md)
+
 ---
 
 ## Primeiro acesso (TOTP)

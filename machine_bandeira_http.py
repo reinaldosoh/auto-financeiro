@@ -13,7 +13,6 @@ import logging
 import re
 from collections import defaultdict
 from datetime import date, timedelta
-from html.parser import HTMLParser
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
@@ -37,62 +36,201 @@ JS_LISTA_MOTORISTA = "listaAnunciosTelaInicialAppTaxista"
 JS_LISTA_CAMPANHA = "listaCampanhas"
 
 
-class _BandeiraFormParser(HTMLParser):
-    """Extrai campos do formulário #bandeira-form."""
+class _BandeiraFormParser:
+    """Extrai campos estáticos do #bandeira-form (regex; ignora <script>)."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.in_form = False
-        self.depth = 0
-        self.fields: Dict[str, List[str]] = defaultdict(list)
-        self._select_name: Optional[str] = None
-        self._textarea_name: Optional[str] = None
+    @staticmethod
+    def _form_html(html: str) -> str:
+        marker = html.find('id="bandeira-form"')
+        if marker < 0:
+            raise RuntimeError("Formulário bandeira-form não encontrado.")
+        start = html.rfind("<form", 0, marker)
+        end = html.find("</form>", start)
+        if end < 0:
+            raise RuntimeError("Fim do formulário bandeira-form não encontrado.")
+        form = html[start : end + len("</form>")]
+        return re.sub(r"<script[\s\S]*?</script>", "", form, flags=re.I)
 
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
-        ad = {k: (v or "") for k, v in attrs}
-        if tag == "form" and ad.get("id") == "bandeira-form":
-            self.in_form = True
-            self.depth = 1
-            return
-        if not self.in_form:
-            return
-        if tag == "form":
-            self.depth += 1
-        elif tag == "input":
-            name = ad.get("name")
-            if not name:
-                return
-            typ = ad.get("type", "text").lower()
+    @classmethod
+    def parse(cls, html: str) -> Dict[str, List[str]]:
+        form = cls._form_html(html)
+        fields: Dict[str, List[str]] = defaultdict(list)
+
+        for tag in re.findall(r"<input[^>]+>", form, flags=re.I):
+            name_m = re.search(r'name="([^"]+)"', tag)
+            if not name_m:
+                continue
+            name = name_m.group(1)
+            typ_m = re.search(r'type="([^"]+)"', tag, re.I)
+            typ = (typ_m.group(1) if typ_m else "text").lower()
             if typ in ("submit", "button", "file", "image"):
-                return
+                continue
+            val_m = re.search(r'value="([^"]*)"', tag)
+            val = val_m.group(1) if val_m else ""
+            checked = "checked" in tag.lower()
             if typ in ("checkbox", "radio"):
-                if "checked" in ad:
-                    self.fields[name].append(ad.get("value", "1"))
+                if checked:
+                    fields[name].append(val if val or typ == "radio" else "on")
             else:
-                self.fields[name].append(ad.get("value", ""))
-        elif tag == "select":
-            self._select_name = ad.get("name")
-        elif tag == "option" and self._select_name:
-            if "selected" in ad:
-                self.fields[self._select_name].append(ad.get("value", ""))
-        elif tag == "textarea":
-            self._textarea_name = ad.get("name")
+                fields[name].append(val)
 
-    def handle_endtag(self, tag: str) -> None:
-        if not self.in_form:
+        for sm in re.finditer(
+            r'<select[^>]+name="([^"]+)"[^>]*>(.*?)</select>', form, re.S | re.I
+        ):
+            name = sm.group(1)
+            selected = re.findall(
+                r'<option[^>]*selected[^>]*value="([^"]*)"', sm.group(2), re.I
+            )
+            if selected:
+                fields[name].extend(selected)
+
+        for tm in re.finditer(
+            r'<textarea[^>]+name="([^"]+)"[^>]*>(.*?)</textarea>', form, re.S | re.I
+        ):
+            fields[tm.group(1)].append(tm.group(2))
+
+        return dict(fields)
+
+
+def _extrair_opcoes_veiculos_proximidade(html: str) -> List[Dict[str, str]]:
+    opcoes: List[Dict[str, str]] = []
+    for bloco in re.findall(r"OPCOES_VEICULOS_PROXIMIDADE\.push\(\{([^}]+)\}", html):
+        opt: Dict[str, str] = {}
+        for chave in ("veiculos", "distancia", "taxiApoio", "taxiParceiro"):
+            m = re.search(
+                rf"{chave}:\s*'([^']*)'|{chave}:\s*parseInt\('(\d+)'\)", bloco
+            )
+            if m:
+                opt[chave] = m.group(1) if m.group(1) is not None else m.group(2)
+        if opt:
+            opcoes.append(opt)
+    return opcoes
+
+
+def _mesclar_despacho_veiculos(fields: Dict[str, List[str]], html: str) -> None:
+    """Campos de despacho renderizados via OPCOES_VEICULOS_PROXIMIDADE (JS)."""
+    opcoes = _extrair_opcoes_veiculos_proximidade(html)
+    for idx, opt in enumerate(opcoes, start=1):
+        if opt.get("veiculos") is not None:
+            _set_field(fields, f"Bandeira[taxis_simultaneos_{idx}]", opt["veiculos"])
+        if opt.get("distancia") is not None:
+            _set_field(fields, f"Bandeira[distancia_taxis_{idx}]", opt["distancia"])
+        for campo, chave in (
+            ("inclui_taxi_apoio", "taxiApoio"),
+            ("inclui_taxi_parceiras", "taxiParceiro"),
+        ):
+            nome = f"Bandeira[{campo}_{idx}]"
+            marcado = str(opt.get(chave, "0")) == "1"
+            fields[nome] = ["0"] + (["1"] if marcado else [])
+        if idx == 1:
+            _set_field(fields, "Bandeira[taxis_area_1]", "1")
+            _set_field(fields, "Bandeira[taxis_ponto_apoio_1]", "1")
+
+
+def _mesclar_mensagens_personalizadas(fields: Dict[str, List[str]], html: str) -> None:
+    contadores: Dict[str, int] = defaultdict(int)
+    for msg, tipo in re.findall(r'addNovaMensagem\("([^"]*)"\s*,\s*\'([PC])\'\)', html):
+        idx = contadores[tipo]
+        _set_field(fields, f"MensagemPersonalizada[{tipo}][{idx}]", msg)
+        contadores[tipo] += 1
+
+
+def _mesclar_marketplace_bandeiras(fields: Dict[str, List[str]], html: str) -> None:
+    ids = re.findall(r"listaSelecionados\.push\((\d+)\)", html)
+    if ids:
+        fields["BandeiraConfiguracao[utilizar_marketplace_agrupadora_bandeiras][]"] = ids
+
+
+def _mesclar_area_permissiva(fields: Dict[str, List[str]], html: str) -> None:
+    if "BandeiraConfiguracao[area_permissiva_id]" in fields:
+        return
+    m = re.search(
+        r'name="BandeiraConfiguracao\[area_permissiva_id\]"[^>]*>(.*?)</select>',
+        html,
+        re.S,
+    )
+    if not m:
+        return
+    for om in re.finditer(r'<option([^>]*)value="([^"]*)"', m.group(1)):
+        if "selected" in om.group(1):
+            _set_field(fields, "BandeiraConfiguracao[area_permissiva_id]", om.group(2))
             return
-        if tag == "select":
-            self._select_name = None
-        elif tag == "textarea":
-            self._textarea_name = None
-        elif tag == "form":
-            self.depth -= 1
-            if self.depth <= 0:
-                self.in_form = False
+    _set_field(fields, "BandeiraConfiguracao[area_permissiva_id]", "0")
 
-    def handle_data(self, data: str) -> None:
-        if self._textarea_name:
-            self.fields[self._textarea_name].append(data)
+
+def _aplicar_item_lista_anuncio(
+    fields: Dict[str, List[str]],
+    nome_mod: str,
+    idx: int,
+    item: Dict[str, Any],
+) -> None:
+    base = f"{nome_mod}[lista][{idx}]"
+    for extra in (f"{base}[bandeira_id]", f"{base}[tipo_anuncio]", f"{base}[url_anuncio]"):
+        fields.pop(extra, None)
+    if str(item.get("excluido", "0")) == "1":
+        _set_field(fields, f"{base}[excluido]", "1")
+        if item.get("id"):
+            _set_field(fields, f"{base}[id]", str(item["id"]))
+        return
+    _set_field(fields, f"{base}[url_imagem]", (item.get("url_imagem") or "").strip())
+    _set_field(fields, f"{base}[excluido]", str(item.get("excluido") or "0"))
+    _set_field(fields, f"{base}[ativo]", str(item.get("ativo") or "1"))
+    if item.get("id"):
+        _set_field(fields, f"{base}[id]", str(item["id"]))
+    else:
+        _set_field(fields, f"{base}[id]", "")
+    if item.get("permite_alterar_url_anuncio", True) and item.get("url_anuncio"):
+        _set_field(fields, f"{base}[url_anuncio]", str(item["url_anuncio"]).strip())
+    bs = item.get("bandeiras") or []
+    if bs:
+        fields[f"{base}[bandeiras][]"] = [str(b) for b in bs]
+
+
+def _mesclar_listas_recursos_premium(fields: Dict[str, List[str]], html: str) -> None:
+    """Replica campos dinâmicos de anúncios/campanhas a partir das variáveis JS."""
+    lista_pass = _extrair_lista_js(html, JS_LISTA_PASSAGEIRO)
+    if lista_pass:
+        _ativar_exibir(fields, "AnuncioTelaInicialAppPass[exibir_anuncio]")
+        for idx, item in enumerate(lista_pass):
+            _aplicar_item_lista_anuncio(fields, "AnuncioTelaInicialAppPass", idx, item)
+
+    lista_mot = _extrair_lista_js(html, JS_LISTA_MOTORISTA)
+    if lista_mot:
+        _ativar_exibir(fields, "AnuncioAppTaxista[exibir_anuncio]")
+        for idx, item in enumerate(lista_mot):
+            _aplicar_item_lista_anuncio(fields, "AnuncioAppTaxista", idx, item)
+
+    lista_camp = _extrair_lista_js(html, JS_LISTA_CAMPANHA)
+    if lista_camp:
+        _ativar_exibir(fields, "Campanha[exibir_campanha]")
+        for idx, item in enumerate(lista_camp):
+            base = f"Campanha[lista][{idx}]"
+            if str(item.get("excluido", "0")) == "1":
+                _set_field(fields, f"{base}[excluido]", "1")
+                if item.get("id"):
+                    _set_field(fields, f"{base}[id]", str(item["id"]))
+                continue
+            _set_field(fields, f"{base}[url_imagem]", (item.get("url_imagem") or "").strip())
+            _set_field(fields, f"{base}[url_campanha]", (item.get("url_campanha") or "").strip())
+            _set_field(fields, f"{base}[excluido]", str(item.get("excluido") or "0"))
+            _set_field(fields, f"{base}[ativo]", str(item.get("ativo") or "1"))
+            if item.get("id"):
+                _set_field(fields, f"{base}[id]", str(item["id"]))
+            for k in ("limite_solicitacoes_finalizadas", "data_hora_inicio", "data_hora_fim"):
+                if item.get(k) is not None:
+                    _set_field(fields, f"{base}[{k}]", str(item[k]))
+            bs = item.get("bandeiras") or []
+            if bs:
+                fields[f"{base}[bandeiras][]"] = [str(b) for b in bs]
+
+
+def _completar_form_bandeira(fields: Dict[str, List[str]], html: str) -> None:
+    """Adiciona campos gerados por JS que o GET estático não inclui no parser."""
+    _mesclar_despacho_veiculos(fields, html)
+    _mesclar_mensagens_personalizadas(fields, html)
+    _mesclar_marketplace_bandeiras(fields, html)
+    _mesclar_area_permissiva(fields, html)
+    _mesclar_listas_recursos_premium(fields, html)
 
 
 def extrair_bandeira_id(html: str) -> str:
@@ -117,9 +255,15 @@ def carregar_form_bandeira(http: requests.Session) -> Tuple[str, Dict[str, List[
         raise RuntimeError("Formulário bandeira-form não encontrado.")
 
     bandeira_id = extrair_bandeira_id(r.text)
-    parser = _BandeiraFormParser()
-    parser.feed(r.text)
-    return bandeira_id, dict(parser.fields), r.text
+    fields = _BandeiraFormParser.parse(r.text)
+    _completar_form_bandeira(fields, r.text)
+    total_pares = sum(len(v) for v in fields.values())
+    log.debug(
+        "Form bandeira carregado: %d chaves, %d pares",
+        len(fields),
+        total_pares,
+    )
+    return bandeira_id, fields, r.text
 
 
 def _set_field(fields: Dict[str, List[str]], name: str, value: str) -> None:
@@ -274,8 +418,8 @@ def upload_imagem_configuracao(
 
 
 def _ativar_exibir(fields: Dict[str, List[str]], nome_campo: str) -> None:
-    """Sim = valor '1' no painel (id *_0)."""
-    _set_field(fields, nome_campo, "1")
+    """Sim = hidden vazio + radio '1' (formato exato do #bandeira-form)."""
+    fields[nome_campo] = ["", "1"]
 
 
 def _preencher_slot_anuncio(
@@ -287,19 +431,23 @@ def _preencher_slot_anuncio(
     bandeira_ids: List[str],
     item_id: str = "",
     excluido: str = "0",
-    bandeira_id: str = "",
-    tipo_anuncio: str = "tela_inicial_app_passageiro",
+    incluir_url_anuncio: bool = True,
 ) -> None:
+    """Campos iguais ao obterHTMLAnuncio / exibirAnuncio (sem bandeira_id/tipo_anuncio)."""
     base = f"{nome_mod}[lista][{idx}]"
     _set_field(fields, f"{base}[url_imagem]", url_imagem)
-    _set_field(fields, f"{base}[url_anuncio]", link)
+    if incluir_url_anuncio:
+        _set_field(fields, f"{base}[url_anuncio]", link)
+    elif f"{base}[url_anuncio]" in fields:
+        del fields[f"{base}[url_anuncio]"]
     _set_field(fields, f"{base}[excluido]", excluido)
     _set_field(fields, f"{base}[ativo]", "1")
-    _set_field(fields, f"{base}[id]", item_id)
-    if bandeira_id:
-        _set_field(fields, f"{base}[bandeira_id]", str(bandeira_id))
-    if tipo_anuncio:
-        _set_field(fields, f"{base}[tipo_anuncio]", tipo_anuncio)
+    if item_id:
+        _set_field(fields, f"{base}[id]", item_id)
+    else:
+        _set_field(fields, f"{base}[id]", "")
+    for extra in (f"{base}[bandeira_id]", f"{base}[tipo_anuncio]"):
+        fields.pop(extra, None)
     if bandeira_ids:
         fields[f"{base}[bandeiras][]"] = list(bandeira_ids)
 
@@ -309,31 +457,12 @@ def _mesclar_lista_anuncios_no_form(
     nome_mod: str,
     lista: List[Dict[str, Any]],
     idx_editar: int,
-    bandeira_id: str = "",
 ) -> None:
-    """Preserva anúncios existentes no POST ao adicionar um slot novo."""
+    """Preserva anúncios existentes no POST (formato do serialize do #bandeira-form)."""
     for idx, item in enumerate(lista):
         if idx == idx_editar:
             continue
-        base = f"{nome_mod}[lista][{idx}]"
-        if str(item.get("excluido", "0")) == "1":
-            _set_field(fields, f"{base}[excluido]", "1")
-            if item.get("id"):
-                _set_field(fields, f"{base}[id]", str(item["id"]))
-            continue
-        _set_field(fields, f"{base}[url_imagem]", (item.get("url_imagem") or "").strip())
-        _set_field(fields, f"{base}[url_anuncio]", (item.get("url_anuncio") or "").strip())
-        _set_field(fields, f"{base}[excluido]", "0")
-        _set_field(fields, f"{base}[ativo]", str(item.get("ativo") or "1"))
-        if item.get("id"):
-            _set_field(fields, f"{base}[id]", str(item["id"]))
-        if item.get("bandeira_id") or bandeira_id:
-            _set_field(fields, f"{base}[bandeira_id]", str(item.get("bandeira_id") or bandeira_id))
-        if item.get("tipo_anuncio"):
-            _set_field(fields, f"{base}[tipo_anuncio]", str(item["tipo_anuncio"]))
-        bs = item.get("bandeiras") or []
-        if bs:
-            fields[f"{base}[bandeiras][]"] = [str(b) for b in bs]
+        _aplicar_item_lista_anuncio(fields, nome_mod, idx, item)
 
 
 def _escolher_slot_passageiro(
@@ -436,14 +565,16 @@ def _confirmar_persistencia_passageiro(
     link_norm = (link_esperado or "").strip().rstrip("/").lower()
     nome_arquivo = url_esperada.split("/")[-1]
 
-    for i, a in enumerate(lista):
-        if str(a.get("excluido", "0")) == "1":
-            continue
+    def _ok(a: Dict[str, Any], i: int) -> Optional[Dict[str, Any]]:
         url = (a.get("url_imagem") or "").strip()
         link = (a.get("url_anuncio") or "").strip().rstrip("/").lower()
-        img_ok = nome_arquivo in url or url == url_esperada
         link_ok = not link_norm or link == link_norm or link_norm in link
-        if img_ok and link_ok:
+        img_ok = bool(url) and (
+            nome_arquivo in url
+            or url == url_esperada
+            or "/upload/anuncios/bandeira/" in url
+        )
+        if link_ok and (img_ok or link_norm):
             return {
                 "salvo": True,
                 "validado": True,
@@ -452,6 +583,21 @@ def _confirmar_persistencia_passageiro(
                 "bandeiras": a.get("bandeiras") or [],
                 "lista_total": len(lista),
             }
+        return None
+
+    for i, a in enumerate(lista):
+        if str(a.get("excluido", "0")) == "1":
+            continue
+        hit = _ok(a, i)
+        if hit:
+            return hit
+
+    if len(lista) > qtd_antes and 0 <= idx_esperado < len(lista):
+        a = lista[idx_esperado]
+        if str(a.get("excluido", "0")) != "1":
+            hit = _ok(a, idx_esperado)
+            if hit:
+                return hit
 
     return {
         "salvo": False,
@@ -515,8 +661,6 @@ def criar_anuncio_passageiro(
     bandeira_id, fields, html = carregar_form_bandeira(http)
     lista = _extrair_lista_js(html, JS_LISTA_PASSAGEIRO)
 
-    _ativar_exibir(fields, f"{nome_mod}[exibir_anuncio]")
-
     novo_idx, modo = _escolher_slot_passageiro(lista, html)
     if novo_idx is None:
         return {"sucesso": False, "mensagem": str(modo)}
@@ -529,11 +673,10 @@ def criar_anuncio_passageiro(
             "mensagem": "Informe bandeira_ids ou selecionar_todas=true.",
         }
 
-    _mesclar_lista_anuncios_no_form(fields, nome_mod, lista, novo_idx, bandeira_id)
     item_id = str(lista[novo_idx].get("id") or "") if novo_idx < len(lista) else ""
     _preencher_slot_anuncio(
         fields, nome_mod, novo_idx, url_s3, link_limpo, ids,
-        item_id=item_id, bandeira_id=bandeira_id,
+        item_id=item_id,
     )
 
     html_save = salvar_bandeira(http, fields, chave_secreta, gerar_codigo_fn)
