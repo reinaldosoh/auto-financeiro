@@ -1233,6 +1233,7 @@ async def dashboard_v2_corridas(inp: DashboardV2ListarInput):
                 page=inp.page,
                 incluir_coordenadas=inp.incluir_coordenadas,
                 apenas_ativos_mapa=inp.apenas_ativos_mapa,
+                enriquecer_alertas=True,
             ),
         )
     except Exception as e:

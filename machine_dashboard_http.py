@@ -154,6 +154,10 @@ def _coord_valida_br(lat: Any, lng: Any) -> bool:
         la, ln = float(lat), float(lng)
     except (TypeError, ValueError):
         return False
+    if la == 0 or ln == 0:
+        return False
+    if abs(la) < 0.05 and abs(ln) < 0.05:
+        return False
     if not (-90 <= la <= 90 and -180 <= ln <= 180):
         return False
     # Brasil continental + margem
