@@ -97,6 +97,73 @@ def aplicar_filtro_corridas(
     return payload
 
 
+def _text(html: str) -> str:
+    t = re.sub(r"<[^>]+>", " ", html)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+# Ícone de intercorrência na grade (coluna de indicadores) — NÃO confundir com hora/celular.
+_ALERTA_ICON_RE = re.compile(
+    r"(?:class=\"[^\"]*(?:alerta|intercorr|warning|atencao|glyphicon-warning|fa-exclamation)[^\"]*\""
+    r"|src=\"[^\"]*(?:alerta|intercorr|warning|atencao)[^\"]*\")",
+    re.I,
+)
+
+
+def _parse_coluna_indicadores(html: str) -> Dict[str, Any]:
+    """Coluna 1 da grade: ícone de alerta (se houver), hora e ícone de app."""
+    tem_alerta = bool(_ALERTA_ICON_RE.search(html or ""))
+    hora_m = re.search(r"\b(\d{2}:\d{2}:\d{2})\b", html or "")
+    return {
+        "tem_alerta": tem_alerta,
+        "hora": hora_m.group(1) if hora_m else "",
+    }
+
+
+def _coord_valida_br(lat: Any, lng: Any) -> bool:
+    try:
+        la, ln = float(lat), float(lng)
+    except (TypeError, ValueError):
+        return False
+    if not (-90 <= la <= 90 and -180 <= ln <= 180):
+        return False
+    # Brasil continental + margem
+    return -35.5 <= la <= 6.0 and -75.0 <= ln <= -28.0
+
+
+def _normalizar_coord_br(lat: Any, lng: Any) -> Tuple[Optional[float], Optional[float]]:
+    """Descarta coords inválidas e corrige lat/lng invertidos quando óbvio."""
+    try:
+        a, b = float(lat), float(lng)
+    except (TypeError, ValueError):
+        return None, None
+    if _coord_valida_br(a, b):
+        return a, b
+    if _coord_valida_br(b, a):
+        return b, a
+    return None, None
+
+
+def _parse_intercorrencias(html: str) -> List[str]:
+    """Caixas amarelas de alerta no painel de detalhes da corrida."""
+    msgs: List[str] = []
+    for block in re.finditer(
+        r'class="[^"]*(?:box-alert|alert-warning|alert-danger|alert-info|alerta|mensagem-alerta|intercorr)[^"]*"[^>]*>(.*?)</(?:div|section|ul)>',
+        html,
+        re.S | re.I,
+    ):
+        t = _text(block.group(1))
+        if t and len(t) > 8:
+            msgs.append(t)
+    for m in re.finditer(r"<li[^>]*>(.*?)</li>", html, re.S):
+        ctx = html[max(0, m.start() - 300) : m.start()]
+        if re.search(r"alert|intercorr|warning|atencao", ctx, re.I):
+            t = _text(m.group(1))
+            if t and len(t) > 8:
+                msgs.append(t)
+    return list(dict.fromkeys(msgs))
+
+
 def _parse_linha_corrida(row_html: str) -> Optional[Dict[str, Any]]:
     os_id = re.search(r'class="identificador">(\d+)', row_html)
     if not os_id:
@@ -105,9 +172,7 @@ def _parse_linha_corrida(row_html: str) -> Optional[Dict[str, Any]]:
     if len(cols) < 9:
         return None
 
-    def _text(html: str) -> str:
-        t = re.sub(r"<[^>]+>", " ", html)
-        return re.sub(r"\s+", " ", t).strip()
+    indicadores = _parse_coluna_indicadores(cols[1])
 
     status_m = re.search(r'class="status([^"]*)"><p>([^<]+)', row_html)
     status_classe = (status_m.group(1) if status_m else "").strip()
@@ -117,7 +182,9 @@ def _parse_linha_corrida(row_html: str) -> Optional[Dict[str, Any]]:
     return {
         "id": os_id.group(1),
         "os": _text(cols[4]) or os_id.group(1),
-        "alerta": _text(cols[1]),
+        "tem_alerta": indicadores["tem_alerta"],
+        "hora": indicadores["hora"],
+        "alerta": indicadores["hora"],
         "partida": _text(cols[5]),
         "passageiro": _text(cols[6]),
         "motorista": _text(cols[7]) if _text(cols[7]) != "---" else None,
@@ -191,11 +258,13 @@ def _buscar_coordenadas_lote(http: requests.Session, ids: List[str]) -> Dict[str
 
     def _fetch(os_id: str) -> Tuple[str, Dict[str, Any]]:
         pos = obter_posicao_corrida(http, os_id)
+        lat_p, lng_p = _normalizar_coord_br(pos.get("lat_partida"), pos.get("lng_partida"))
+        lat_m, lng_m = _normalizar_coord_br(pos.get("lat_taxista"), pos.get("lng_taxista"))
         return os_id, {
-            "lat_partida": pos.get("lat_partida"),
-            "lng_partida": pos.get("lng_partida"),
-            "lat_motorista": pos.get("lat_taxista"),
-            "lng_motorista": pos.get("lng_taxista"),
+            "lat_partida": lat_p,
+            "lng_partida": lng_p,
+            "lat_motorista": lat_m,
+            "lng_motorista": lng_m,
             "status_codigo": pos.get("status_solicitacao"),
         }
 
@@ -281,6 +350,9 @@ def obter_detalhe_corrida(http: requests.Session, os_id: str) -> Dict[str, Any]:
 
     detalhes = _parse_detalhes_html(r.text, os_id)
     pos = pos_task
+    intercorrencias = _parse_intercorrencias(r.text)
+    lat_p, lng_p = _normalizar_coord_br(pos.get("lat_partida"), pos.get("lng_partida"))
+    lat_m, lng_m = _normalizar_coord_br(pos.get("lat_taxista"), pos.get("lng_taxista"))
 
     status_codigo = pos.get("status_solicitacao")
     status_texto = _STATUS_TEXTO.get(str(status_codigo), detalhes.get("status"))
@@ -292,12 +364,14 @@ def obter_detalhe_corrida(http: requests.Session, os_id: str) -> Dict[str, Any]:
         "status": status_texto or detalhes.get("status"),
         "status_codigo": status_codigo,
         "link_rastreio": detalhes.get("link_rastreio"),
+        "tem_alerta": bool(intercorrencias),
+        "intercorrencias": intercorrencias,
         "informacoes": detalhes,
         "posicao": {
-            "lat_partida": pos.get("lat_partida"),
-            "lng_partida": pos.get("lng_partida"),
-            "lat_motorista": pos.get("lat_taxista"),
-            "lng_motorista": pos.get("lng_taxista"),
+            "lat_partida": lat_p,
+            "lng_partida": lng_p,
+            "lat_motorista": lat_m,
+            "lng_motorista": lng_m,
             "trajeto": pos.get("array_posicao") or [],
             "paradas": pos.get("array_parada") or [],
         },
