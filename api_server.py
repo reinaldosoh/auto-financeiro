@@ -85,6 +85,13 @@ from machine_dinamica_http import (
     editar_fator_area,
     listar_areas,
 )
+from machine_dashboard_http import (
+    aplicar_filtro_corridas,
+    listar_corridas,
+    obter_bandeiras_historico,
+    obter_detalhe_corrida,
+    obter_posicao_corrida,
+)
 from machine_notificacao_http import (
     aguardar_relatorio,
     autenticar_acao_2fa,
@@ -307,6 +314,20 @@ class NotificacaoAutenticarAcaoInput(BaseModel):
 class NotificacaoCancelarInput(BaseModel):
     session_token: str
     destinatario: str = "D"
+
+
+class DashboardV2FiltroInput(BaseModel):
+    session_token: str
+    bandeira_id: Optional[str] = None
+    horas: float = 0.25
+    filtro_matriz: Optional[str] = None
+
+
+class DashboardV2ListarInput(BaseModel):
+    session_token: str
+    page: int = 1
+    incluir_coordenadas: bool = True
+    apenas_ativos_mapa: bool = False
 
 
 class DinamicaAtivarAreaInput(BaseModel):
@@ -1157,6 +1178,88 @@ async def notificacao_cancelar(
             executor,
             lambda: cancelar_notificacao(http, notificacao_id, destinatario),
         )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.get("/dashboard-v2/bandeiras")
+async def dashboard_v2_bandeiras(session_token: str):
+    http = _require_session(session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        bandeiras = await loop.run_in_executor(executor, lambda: obter_bandeiras_historico(http))
+        return {"sucesso": True, "bandeiras": bandeiras}
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/dashboard-v2/filtro")
+async def dashboard_v2_filtro(inp: DashboardV2FiltroInput):
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        resultado = await loop.run_in_executor(
+            executor,
+            lambda: aplicar_filtro_corridas(
+                http,
+                bandeira_id=inp.bandeira_id,
+                horas=inp.horas,
+                filtro_matriz=inp.filtro_matriz,
+            ),
+        )
+        lista = await loop.run_in_executor(
+            executor,
+            lambda: listar_corridas(http, incluir_coordenadas=True, apenas_ativos_mapa=False),
+        )
+        return {"sucesso": True, "filtro": resultado, **lista}
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/dashboard-v2/corridas")
+async def dashboard_v2_corridas(inp: DashboardV2ListarInput):
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: listar_corridas(
+                http,
+                page=inp.page,
+                incluir_coordenadas=inp.incluir_coordenadas,
+                apenas_ativos_mapa=inp.apenas_ativos_mapa,
+            ),
+        )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.get("/dashboard-v2/corridas/{os_id}")
+async def dashboard_v2_detalhe(os_id: str, session_token: str):
+    http = _require_session(session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor, lambda: obter_detalhe_corrida(http, os_id))
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.get("/dashboard-v2/corridas/{os_id}/posicao")
+async def dashboard_v2_posicao(os_id: str, session_token: str):
+    http = _require_session(session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        pos = await loop.run_in_executor(executor, lambda: obter_posicao_corrida(http, os_id))
+        return {
+            "sucesso": True,
+            "id": os_id,
+            "status_codigo": pos.get("status_solicitacao"),
+            "lat_partida": pos.get("lat_partida"),
+            "lng_partida": pos.get("lng_partida"),
+            "lat_motorista": pos.get("lat_taxista"),
+            "lng_motorista": pos.get("lng_taxista"),
+            "trajeto": pos.get("array_posicao") or [],
+        }
     except Exception as e:
         raise _notificacao_http_erro(e)
 
