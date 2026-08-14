@@ -102,18 +102,47 @@ def _text(html: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
-# Ícone de intercorrência na grade (coluna de indicadores) — NÃO confundir com hora/celular.
-_ALERTA_ICON_RE = re.compile(
-    r"(?:class=\"[^\"]*(?:alerta|intercorr|warning|atencao|glyphicon-warning|fa-exclamation)[^\"]*\""
-    r"|src=\"[^\"]*(?:alerta|intercorr|warning|atencao)[^\"]*\")",
-    re.I,
-)
+_IMG_TAG_RE = re.compile(r"<img[^>]*>", re.I)
 
 
-def _parse_coluna_indicadores(html: str) -> Dict[str, Any]:
-    """Coluna 1 da grade: ícone de alerta (se houver), hora e ícone de app."""
-    tem_alerta = bool(_ALERTA_ICON_RE.search(html or ""))
-    hora_m = re.search(r"\b(\d{2}:\d{2}:\d{2})\b", html or "")
+def _tag_eh_celular(tag: str) -> bool:
+    return bool(
+        re.search(
+            r"celular|smartphone|mobile|phone|app[-_]?pass|passageiro|device|android|iphone|icone-app",
+            tag,
+            re.I,
+        )
+    )
+
+
+def _parse_coluna_indicadores(html: str, row_html: str = "") -> Dict[str, Any]:
+    """
+    Coluna de indicadores: hora + ícone de app (sempre) + triângulo de alerta (opcional).
+    Na Machine o alerta costuma ser um <img> extra (não o celular).
+    """
+    blob = html or ""
+    imgs = _IMG_TAG_RE.findall(blob)
+    non_phone = [t for t in imgs if not _tag_eh_celular(t)]
+    tem_alerta = len(non_phone) > 0
+
+    if not tem_alerta:
+        tem_alerta = bool(
+            re.search(
+                r"(?:fa-exclamation|glyphicon-warning|icon-alerta|icon_alerta|intercorr|class=\"[^\"]*alerta[^\"]*\")",
+                blob,
+                re.I,
+            )
+        )
+    if not tem_alerta and row_html:
+        tem_alerta = bool(
+            re.search(
+                r"(?:intercorr|icon-alerta|icon_alerta|alerta\.png|exclamation-triangle|triangulo)",
+                row_html,
+                re.I,
+            )
+        )
+
+    hora_m = re.search(r"\b(\d{2}:\d{2}:\d{2})\b", blob)
     return {
         "tem_alerta": tem_alerta,
         "hora": hora_m.group(1) if hora_m else "",
@@ -148,7 +177,7 @@ def _parse_intercorrencias(html: str) -> List[str]:
     """Caixas amarelas de alerta no painel de detalhes da corrida."""
     msgs: List[str] = []
     for block in re.finditer(
-        r'class="[^"]*(?:box-alert|alert-warning|alert-danger|alert-info|alerta|mensagem-alerta|intercorr)[^"]*"[^>]*>(.*?)</(?:div|section|ul)>',
+        r'class="[^"]*(?:box-alert|alert-warning|alert-danger|alert-info|alerta|mensagem-alerta|intercorr|aviso)[^"]*"[^>]*>(.*?)</(?:div|section|ul)>',
         html,
         re.S | re.I,
     ):
@@ -161,6 +190,13 @@ def _parse_intercorrencias(html: str) -> List[str]:
             t = _text(m.group(1))
             if t and len(t) > 8:
                 msgs.append(t)
+    # Machine: parágrafos com texto de intercorrência (ex.: "Motorista demorou...")
+    for m in re.finditer(r"<p[^>]*>([^<]{12,300})</p>", html, re.S):
+        t = _text(m.group(1))
+        if not t or len(t) < 12:
+            continue
+        if re.search(r"demorou|atraso|intercorr|nao chegou|não chegou|aceite", t, re.I):
+            msgs.append(t)
     return list(dict.fromkeys(msgs))
 
 
@@ -172,7 +208,7 @@ def _parse_linha_corrida(row_html: str) -> Optional[Dict[str, Any]]:
     if len(cols) < 9:
         return None
 
-    indicadores = _parse_coluna_indicadores(cols[1])
+    indicadores = _parse_coluna_indicadores(cols[1] if len(cols) > 1 else "", row_html)
 
     status_m = re.search(r'class="status([^"]*)"><p>([^<]+)', row_html)
     status_classe = (status_m.group(1) if status_m else "").strip()
@@ -209,6 +245,40 @@ def _parse_grid_render(render: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any
     return corridas, meta
 
 
+def _enriquecer_alertas_via_detalhe(
+    http: requests.Session, corridas: List[Dict[str, Any]], max_rows: int = 50
+) -> None:
+    """Fallback: confirma alertas via HTML de detalhe quando a grade não traz o ícone."""
+    alvos = [c for c in corridas if not c.get("tem_alerta")][:max_rows]
+    if not alvos:
+        return
+
+    def _fetch(c: Dict[str, Any]) -> Tuple[str, bool]:
+        os_id = str(c["id"])
+        try:
+            r = http.get(
+                BASE_URL + "/solicitacao/detalhesCorridas",
+                params={"tipo": 3, "nova": 1, "tipoHistorico": "corrida", "id": os_id},
+                timeout=45,
+            )
+            if r.status_code != 200:
+                return os_id, False
+            return os_id, bool(_parse_intercorrencias(r.text))
+        except Exception as exc:
+            log.warning("alerta detalhe %s: %s", os_id, exc)
+            return os_id, False
+
+    workers = min(6, len(alvos))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for os_id, tem in pool.map(_fetch, alvos):
+            if not tem:
+                continue
+            for c in corridas:
+                if str(c["id"]) == os_id:
+                    c["tem_alerta"] = True
+                    break
+
+
 def listar_corridas(
     http: requests.Session,
     *,
@@ -216,6 +286,7 @@ def listar_corridas(
     incluir_coordenadas: bool = False,
     apenas_ativos_mapa: bool = False,
     max_coordenadas: int = 40,
+    enriquecer_alertas: bool = False,
 ) -> Dict[str, Any]:
     """Lista corridas da grade via POST /solicitacao/historicoCorridas2 (json=true)."""
     _ensure_session(http)
@@ -242,6 +313,9 @@ def listar_corridas(
             extra = coords.get(c["id"])
             if extra:
                 c.update(extra)
+
+    if enriquecer_alertas and corridas_filtradas and len(corridas_filtradas) <= 60:
+        _enriquecer_alertas_via_detalhe(http, corridas_filtradas)
 
     return {
         "sucesso": True,

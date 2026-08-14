@@ -1209,7 +1209,12 @@ async def dashboard_v2_filtro(inp: DashboardV2FiltroInput):
         )
         lista = await loop.run_in_executor(
             executor,
-            lambda: listar_corridas(http, incluir_coordenadas=True, apenas_ativos_mapa=False),
+            lambda: listar_corridas(
+                http,
+                incluir_coordenadas=True,
+                apenas_ativos_mapa=False,
+                enriquecer_alertas=True,
+            ),
         )
         return {"sucesso": True, "filtro": resultado, **lista}
     except Exception as e:
