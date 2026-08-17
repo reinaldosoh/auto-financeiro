@@ -88,6 +88,7 @@ from machine_dinamica_http import (
 from machine_dashboard_http import (
     aplicar_filtro_corridas,
     listar_corridas,
+    monitor_alertas_cidades,
     obter_bandeiras_historico,
     obter_detalhe_corrida,
     obter_posicao_corrida,
@@ -328,6 +329,20 @@ class DashboardV2ListarInput(BaseModel):
     page: int = 1
     incluir_coordenadas: bool = True
     apenas_ativos_mapa: bool = False
+
+
+class MonitorAlertasCidadeItem(BaseModel):
+    cidade_id: str
+    cidade_nome: str
+    bandeira_id: str
+    empresa_id: str
+    empresa_nome: str
+
+
+class MonitorAlertasEmpresaInput(BaseModel):
+    session_token: str
+    cidades: list[MonitorAlertasCidadeItem]
+    horas: float = 4
 
 
 class DinamicaAtivarAreaInput(BaseModel):
@@ -1266,6 +1281,27 @@ async def dashboard_v2_posicao(os_id: str, session_token: str):
             "lng_motorista": pos.get("lng_taxista"),
             "trajeto": pos.get("array_posicao") or [],
         }
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/dashboard-v2/monitor-alertas")
+async def dashboard_v2_monitor_alertas(inp: MonitorAlertasEmpresaInput):
+    """
+    Varre cidades de uma empresa e retorna apenas corridas com alerta operacional.
+    Usado pelo cron monitor-corridas-alertas (Edge Function Supabase).
+    """
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: monitor_alertas_cidades(
+                http,
+                [c.model_dump() for c in inp.cidades],
+                horas=inp.horas,
+            ),
+        )
     except Exception as e:
         raise _notificacao_http_erro(e)
 

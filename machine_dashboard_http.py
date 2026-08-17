@@ -467,3 +467,99 @@ def obter_detalhe_corrida(http: requests.Session, os_id: str) -> Dict[str, Any]:
         "endereco_partida": pos.get("endereco_partida") or detalhes.get("local_de_embarque"),
         "destino": detalhes.get("destino_informado"),
     }
+
+
+def _status_bloqueia_rastreio(status: Optional[str]) -> bool:
+    s = (status or "").lower()
+    return "cancel" in s or "finaliz" in s
+
+
+def _montar_payload_alerta_monitor(
+    *,
+    cidade_id: str,
+    cidade_nome: str,
+    empresa_id: str,
+    empresa_nome: str,
+    bandeira_nome: str,
+    linha: Dict[str, Any],
+    detalhe: Dict[str, Any],
+) -> Dict[str, Any]:
+    intercorrencias = detalhe.get("intercorrencias") or []
+    if not intercorrencias and linha.get("tem_alerta"):
+        intercorrencias = ["Alerta operacional na grade"]
+    status = str(detalhe.get("status") or linha.get("status") or "")
+    link = detalhe.get("link_rastreio")
+    passageiro = detalhe.get("passageiro") or {}
+    motorista = detalhe.get("motorista") or {}
+    return {
+        "cidade_id": cidade_id,
+        "cidade_nome": cidade_nome,
+        "empresa_id": empresa_id,
+        "empresa_nome": empresa_nome,
+        "bandeira": bandeira_nome or linha.get("empresa") or "",
+        "alerta": intercorrencias[0] if intercorrencias else "",
+        "alertas": intercorrencias,
+        "status_corrida": status,
+        "numero_os": str(detalhe.get("os") or linha.get("os") or linha.get("id") or ""),
+        "link_rastreio": None if _status_bloqueia_rastreio(status) else link,
+        "passageiro": {
+            "nome": passageiro.get("nome") or linha.get("passageiro") or "",
+            "telefone": passageiro.get("telefone") or "",
+        },
+        "motorista": {
+            "nome": motorista.get("nome") or linha.get("motorista") or "",
+            "telefone": motorista.get("telefone") or "",
+        },
+    }
+
+
+def monitor_alertas_cidades(
+    http: requests.Session,
+    cidades: List[Dict[str, Any]],
+    *,
+    horas: float = 4,
+    max_detalhes_por_cidade: int = 20,
+) -> Dict[str, Any]:
+    """
+    Para cada cidade (bandeira), aplica filtro, lista corridas com alerta e enriquece detalhe.
+    Reutiliza a mesma sessão HTTP (login único por empresa).
+    """
+    bandeira_nomes = {b["id"]: b["nome"] for b in obter_bandeiras_historico(http)}
+    alertas: List[Dict[str, Any]] = []
+    erros: List[Dict[str, str]] = []
+
+    for cidade in cidades:
+        cidade_id = str(cidade.get("cidade_id") or "")
+        bandeira_id = str(cidade.get("bandeira_id") or "")
+        if not bandeira_id:
+            erros.append({"cidade_id": cidade_id, "erro": "bandeira_id ausente"})
+            continue
+        try:
+            aplicar_filtro_corridas(http, bandeira_id=bandeira_id, horas=horas)
+            lista = listar_corridas(
+                http,
+                incluir_coordenadas=False,
+                enriquecer_alertas=True,
+            )
+            com_alerta = [c for c in lista.get("corridas") or [] if c.get("tem_alerta")]
+            for linha in com_alerta[:max_detalhes_por_cidade]:
+                os_id = str(linha.get("id") or "")
+                if not os_id:
+                    continue
+                det = obter_detalhe_corrida(http, os_id)
+                alertas.append(
+                    _montar_payload_alerta_monitor(
+                        cidade_id=cidade_id,
+                        cidade_nome=str(cidade.get("cidade_nome") or ""),
+                        empresa_id=str(cidade.get("empresa_id") or ""),
+                        empresa_nome=str(cidade.get("empresa_nome") or ""),
+                        bandeira_nome=bandeira_nomes.get(bandeira_id, ""),
+                        linha=linha,
+                        detalhe=det,
+                    )
+                )
+        except Exception as exc:
+            log.warning("monitor alertas cidade %s: %s", cidade_id, exc)
+            erros.append({"cidade_id": cidade_id, "erro": str(exc)})
+
+    return {"sucesso": True, "alertas": alertas, "erros": erros, "horas": horas}
