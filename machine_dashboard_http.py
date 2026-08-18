@@ -292,11 +292,11 @@ def _enriquecer_alertas_via_detalhe(
 def _fetch_corridas_pagina(http: requests.Session, page: int = 1) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Any]:
     """Busca uma página da grade historicoCorridas2."""
     _ensure_session(http)
-    data: Dict[str, Any] = {"json": "true"}
+    url = BASE_URL + "/solicitacao/historicoCorridas2"
     if page > 1:
-        data["page"] = str(page)
+        url += f"?page={page}"
 
-    r = http.post(BASE_URL + "/solicitacao/historicoCorridas2", data=data, timeout=60)
+    r = http.post(url, data={"json": "true"}, timeout=60)
     payload = _parse_json_response(r)
     render = payload.get("render") or ""
     if not render:
