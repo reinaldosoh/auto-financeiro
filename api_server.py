@@ -323,6 +323,8 @@ class DashboardV2FiltroInput(BaseModel):
     bandeira_id: Optional[str] = None
     horas: float = 0.25
     filtro_matriz: Optional[str] = None
+    incluir_coordenadas: bool = True
+    enriquecer_alertas: bool = True
 
 
 class DashboardV2ListarInput(BaseModel):
@@ -1227,9 +1229,9 @@ async def dashboard_v2_filtro(inp: DashboardV2FiltroInput):
             executor,
             lambda: listar_corridas_todas(
                 http,
-                incluir_coordenadas=True,
+                incluir_coordenadas=inp.incluir_coordenadas,
                 apenas_ativos_mapa=False,
-                enriquecer_alertas=True,
+                enriquecer_alertas=inp.enriquecer_alertas,
             ),
         )
         return {"sucesso": True, "filtro": resultado, **lista}

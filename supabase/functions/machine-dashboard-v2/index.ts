@@ -172,9 +172,28 @@ async function executarComSessao(
           bandeira_id: bandeira_id ?? rest.bandeira_id,
           horas: rest.horas ?? 0.25,
           filtro_matriz: rest.filtro_matriz,
+          incluir_coordenadas: rest.incluir_coordenadas ?? true,
+          enriquecer_alertas: rest.enriquecer_alertas ?? true,
         },
       });
-    case "corridas":
+    case "corridas": {
+      const precisaFiltro =
+        bandeira_id ||
+        rest.horas != null ||
+        rest.filtro_matriz != null;
+      if (precisaFiltro) {
+        return chamar(baseUrl, "/dashboard-v2/filtro", {
+          method: "POST",
+          body: {
+            session_token: sessionToken,
+            bandeira_id: bandeira_id ?? rest.bandeira_id,
+            horas: rest.horas ?? 0.25,
+            filtro_matriz: rest.filtro_matriz,
+            incluir_coordenadas: rest.incluir_coordenadas ?? true,
+            enriquecer_alertas: rest.enriquecer_alertas ?? true,
+          },
+        });
+      }
       return chamar(baseUrl, "/dashboard-v2/corridas", {
         method: "POST",
         body: {
@@ -184,6 +203,7 @@ async function executarComSessao(
           apenas_ativos_mapa: rest.apenas_ativos_mapa ?? false,
         },
       });
+    }
     case "detalhe":
       return chamar(baseUrl, `/dashboard-v2/corridas/${encodeURIComponent(String(rest.os_id))}`, {
         query: { session_token: sessionToken },
@@ -243,7 +263,10 @@ async function rodarAcao(ctx: Ctx, acao: Acao, rest: Record<string, unknown>) {
     sessao = await obterSessao(ctx, true);
     resultado = await executarComSessao(ctx, sessao.token, acao, rest, bandeira_id);
   }
-  return jsonResponse(resultado);
+
+  const payload = extrairPayloadVps(resultado.body);
+  const httpStatus = resultado.status >= 400 ? resultado.status : 200;
+  return jsonResponse({ status: httpStatus, body: payload }, httpStatus);
 }
 
 Deno.serve(async (req) => {

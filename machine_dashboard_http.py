@@ -242,6 +242,8 @@ def _parse_grid_render(render: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any
     summary = summary_m.group(1).strip() if summary_m else ""
     total = None
     total_m = re.search(r"de\s+([\d\.]+)\s+resultados?", summary)
+    if not total_m:
+        total_m = re.search(r"de\s+([\d\.]+)\s+resultados?", render)
     if total_m:
         total = int(total_m.group(1).replace(".", ""))
     paginas_link = len(set(re.findall(r"page=(\d+)", render)))
@@ -374,21 +376,31 @@ def listar_corridas_todas(
 ) -> Dict[str, Any]:
     """Percorre todas as páginas da grade e retorna a lista completa."""
     primeira, meta, filtro = _fetch_corridas_pagina(http, 1)
-    paginas = int(meta.get("paginas") or 1)
-    paginas = min(max(paginas, 1), max_paginas)
+    tamanho_pagina = len(primeira) or int(meta.get("pagina_tamanho") or 25)
 
     por_id: Dict[str, Dict[str, Any]] = {str(c["id"]): c for c in primeira if c.get("id")}
-    for pagina in range(2, paginas + 1):
-        lote, _, _ = _fetch_corridas_pagina(http, pagina)
+    paginas_consultadas = 1
+
+    pagina = 2
+    while pagina <= max_paginas:
+        lote, meta_p, _ = _fetch_corridas_pagina(http, pagina)
+        if not lote:
+            break
         for c in lote:
             cid = str(c.get("id") or "")
             if cid:
                 por_id[cid] = c
+        paginas_consultadas = pagina
+        if meta_p.get("paginas"):
+            meta["paginas"] = max(int(meta.get("paginas") or 1), int(meta_p["paginas"]))
+        if len(lote) < tamanho_pagina:
+            break
+        pagina += 1
 
     todas = list(por_id.values())
     meta = {
         **meta,
-        "paginas_consultadas": paginas,
+        "paginas_consultadas": paginas_consultadas,
         "total_listado": len(todas),
     }
 
