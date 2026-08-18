@@ -244,8 +244,12 @@ def _parse_grid_render(render: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any
     total_m = re.search(r"de\s+([\d\.]+)\s+resultados?", summary)
     if total_m:
         total = int(total_m.group(1).replace(".", ""))
-    paginas = len(re.findall(r'href="[^"]*page=(\d+)', render))
-    meta = {"summary": summary, "total": total, "paginas": max(paginas, 1)}
+    paginas_link = len(set(re.findall(r"page=(\d+)", render)))
+    if total and corridas:
+        paginas = max(1, (total + len(corridas) - 1) // len(corridas))
+    else:
+        paginas = max(paginas_link, 1)
+    meta = {"summary": summary, "total": total, "paginas": paginas, "pagina_tamanho": len(corridas) or None}
     return corridas, meta
 
 
@@ -283,16 +287,8 @@ def _enriquecer_alertas_via_detalhe(
                     break
 
 
-def listar_corridas(
-    http: requests.Session,
-    *,
-    page: int = 1,
-    incluir_coordenadas: bool = False,
-    apenas_ativos_mapa: bool = False,
-    max_coordenadas: int = 40,
-    enriquecer_alertas: bool = False,
-) -> Dict[str, Any]:
-    """Lista corridas da grade via POST /solicitacao/historicoCorridas2 (json=true)."""
+def _fetch_corridas_pagina(http: requests.Session, page: int = 1) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Any]:
+    """Busca uma página da grade historicoCorridas2."""
     _ensure_session(http)
     data: Dict[str, Any] = {"json": True}
     if page > 1:
@@ -303,8 +299,19 @@ def listar_corridas(
     render = payload.get("render") or ""
     if not render:
         raise RuntimeError("Resposta vazia ao listar corridas.")
-
     corridas, meta = _parse_grid_render(render)
+    return corridas, meta, payload.get("HistoricoFilterForm")
+
+
+def _aplicar_pos_processamento_corridas(
+    http: requests.Session,
+    corridas: List[Dict[str, Any]],
+    *,
+    incluir_coordenadas: bool = False,
+    apenas_ativos_mapa: bool = False,
+    max_coordenadas: int = 40,
+    enriquecer_alertas: bool = False,
+) -> List[Dict[str, Any]]:
     if apenas_ativos_mapa:
         corridas_filtradas = [c for c in corridas if c.get("ativo_mapa")]
     else:
@@ -318,14 +325,87 @@ def listar_corridas(
             if extra:
                 c.update(extra)
 
-    if enriquecer_alertas and corridas_filtradas and len(corridas_filtradas) <= 60:
-        _enriquecer_alertas_via_detalhe(http, corridas_filtradas)
+    if enriquecer_alertas and corridas_filtradas:
+        _enriquecer_alertas_via_detalhe(
+            http,
+            corridas_filtradas,
+            max_rows=min(120, len(corridas_filtradas)),
+        )
+
+    return corridas_filtradas
+
+
+def listar_corridas(
+    http: requests.Session,
+    *,
+    page: int = 1,
+    incluir_coordenadas: bool = False,
+    apenas_ativos_mapa: bool = False,
+    max_coordenadas: int = 40,
+    enriquecer_alertas: bool = False,
+) -> Dict[str, Any]:
+    """Lista corridas da grade via POST /solicitacao/historicoCorridas2 (json=true)."""
+    corridas, meta, filtro = _fetch_corridas_pagina(http, page)
+    corridas_filtradas = _aplicar_pos_processamento_corridas(
+        http,
+        corridas,
+        incluir_coordenadas=incluir_coordenadas,
+        apenas_ativos_mapa=apenas_ativos_mapa,
+        max_coordenadas=max_coordenadas,
+        enriquecer_alertas=enriquecer_alertas,
+    )
 
     return {
         "sucesso": True,
         "corridas": corridas_filtradas,
         "meta": meta,
-        "filtro": payload.get("HistoricoFilterForm"),
+        "filtro": filtro,
+    }
+
+
+def listar_corridas_todas(
+    http: requests.Session,
+    *,
+    incluir_coordenadas: bool = False,
+    apenas_ativos_mapa: bool = False,
+    max_coordenadas: int = 40,
+    enriquecer_alertas: bool = False,
+    max_paginas: int = 30,
+) -> Dict[str, Any]:
+    """Percorre todas as páginas da grade e retorna a lista completa."""
+    primeira, meta, filtro = _fetch_corridas_pagina(http, 1)
+    paginas = int(meta.get("paginas") or 1)
+    paginas = min(max(paginas, 1), max_paginas)
+
+    por_id: Dict[str, Dict[str, Any]] = {str(c["id"]): c for c in primeira if c.get("id")}
+    for pagina in range(2, paginas + 1):
+        lote, _, _ = _fetch_corridas_pagina(http, pagina)
+        for c in lote:
+            cid = str(c.get("id") or "")
+            if cid:
+                por_id[cid] = c
+
+    todas = list(por_id.values())
+    meta = {
+        **meta,
+        "paginas_consultadas": paginas,
+        "total_listado": len(todas),
+    }
+
+    corridas_filtradas = _aplicar_pos_processamento_corridas(
+        http,
+        todas,
+        incluir_coordenadas=incluir_coordenadas,
+        apenas_ativos_mapa=apenas_ativos_mapa,
+        max_coordenadas=max_coordenadas,
+        enriquecer_alertas=enriquecer_alertas,
+    )
+
+    return {
+        "sucesso": True,
+        "corridas": corridas_filtradas,
+        "meta": meta,
+        "filtro": filtro,
     }
 
 
@@ -536,7 +616,7 @@ def monitor_alertas_cidades(
             continue
         try:
             aplicar_filtro_corridas(http, bandeira_id=bandeira_id, horas=horas)
-            lista = listar_corridas(
+            lista = listar_corridas_todas(
                 http,
                 incluir_coordenadas=False,
                 enriquecer_alertas=True,

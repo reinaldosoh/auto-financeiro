@@ -88,6 +88,7 @@ from machine_dinamica_http import (
 from machine_dashboard_http import (
     aplicar_filtro_corridas,
     listar_corridas,
+    listar_corridas_todas,
     monitor_alertas_cidades,
     obter_bandeiras_historico,
     obter_detalhe_corrida,
@@ -1224,7 +1225,7 @@ async def dashboard_v2_filtro(inp: DashboardV2FiltroInput):
         )
         lista = await loop.run_in_executor(
             executor,
-            lambda: listar_corridas(
+            lambda: listar_corridas_todas(
                 http,
                 incluir_coordenadas=True,
                 apenas_ativos_mapa=False,
@@ -1241,16 +1242,23 @@ async def dashboard_v2_corridas(inp: DashboardV2ListarInput):
     http = _require_session(inp.session_token)
     loop = asyncio.get_event_loop()
     try:
-        return await loop.run_in_executor(
-            executor,
+        fn = (
             lambda: listar_corridas(
                 http,
                 page=inp.page,
                 incluir_coordenadas=inp.incluir_coordenadas,
                 apenas_ativos_mapa=inp.apenas_ativos_mapa,
                 enriquecer_alertas=True,
-            ),
+            )
+            if inp.page > 1
+            else lambda: listar_corridas_todas(
+                http,
+                incluir_coordenadas=inp.incluir_coordenadas,
+                apenas_ativos_mapa=inp.apenas_ativos_mapa,
+                enriquecer_alertas=True,
+            )
         )
+        return await loop.run_in_executor(executor, fn)
     except Exception as e:
         raise _notificacao_http_erro(e)
 

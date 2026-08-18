@@ -208,6 +208,7 @@ async function rodarAcao(ctx: Ctx, acao: Acao, rest: Record<string, unknown>) {
     const bandPayload = extrairPayloadVps(bandResp.body);
     const horas = rest.horas ?? 0.25;
     let corridas: unknown = [];
+    let meta: unknown = undefined;
     if (bandeira_id) {
       const filtro = await chamar(ctx.creds.baseUrl, "/dashboard-v2/filtro", {
         method: "POST",
@@ -219,6 +220,7 @@ async function rodarAcao(ctx: Ctx, acao: Acao, rest: Record<string, unknown>) {
       });
       const filtroPayload = extrairPayloadVps(filtro.body);
       corridas = filtroPayload.corridas ?? [];
+      meta = (filtroPayload.meta as Record<string, unknown> | undefined) ?? undefined;
     }
     return jsonResponse({
       status: 200,
@@ -228,6 +230,7 @@ async function rodarAcao(ctx: Ctx, acao: Acao, rest: Record<string, unknown>) {
         bandeira_id,
         bandeiras: bandPayload.bandeiras ?? [],
         corridas,
+        meta,
         horas,
       },
     });
