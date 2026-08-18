@@ -377,15 +377,30 @@ def listar_corridas_todas(
     """Percorre todas as páginas da grade e retorna a lista completa."""
     primeira, meta, filtro = _fetch_corridas_pagina(http, 1)
     tamanho_pagina = len(primeira) or int(meta.get("pagina_tamanho") or 25)
+    total_esperado = meta.get("total")
+    paginas_meta = meta.get("paginas")
 
     por_id: Dict[str, Dict[str, Any]] = {str(c["id"]): c for c in primeira if c.get("id")}
     paginas_consultadas = 1
 
+    if paginas_meta:
+        limite_paginas = min(max_paginas, int(paginas_meta))
+    elif total_esperado and tamanho_pagina:
+        limite_paginas = min(
+            max_paginas,
+            max(1, (int(total_esperado) + tamanho_pagina - 1) // tamanho_pagina),
+        )
+    else:
+        limite_paginas = max_paginas
+
     pagina = 2
-    while pagina <= max_paginas:
+    while pagina <= limite_paginas:
+        if total_esperado and len(por_id) >= int(total_esperado):
+            break
         lote, meta_p, _ = _fetch_corridas_pagina(http, pagina)
         if not lote:
             break
+        antes = len(por_id)
         for c in lote:
             cid = str(c.get("id") or "")
             if cid:
@@ -393,6 +408,10 @@ def listar_corridas_todas(
         paginas_consultadas = pagina
         if meta_p.get("paginas"):
             meta["paginas"] = max(int(meta.get("paginas") or 1), int(meta_p["paginas"]))
+        if len(por_id) == antes:
+            break
+        if total_esperado and len(por_id) >= int(total_esperado):
+            break
         if len(lote) < tamanho_pagina:
             break
         pagina += 1

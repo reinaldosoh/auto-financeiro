@@ -152,6 +152,77 @@ async function obterSessao(ctx: Ctx, forcar = false): Promise<SessaoCache> {
   }
 }
 
+/** Aplica filtro e pagina TODAS as páginas na mesma sessão VPS (1 invoke edge). */
+async function filtrarPaginadoCompleto(
+  ctx: Ctx,
+  sessionToken: string,
+  rest: Record<string, unknown>,
+  bandeira_id?: string,
+): Promise<{ status: number; body: unknown }> {
+  const { baseUrl } = ctx.creds;
+  const bodyFiltro = {
+    session_token: sessionToken,
+    bandeira_id: bandeira_id ?? rest.bandeira_id,
+    horas: rest.horas ?? 0.25,
+    filtro_matriz: rest.filtro_matriz,
+    incluir_coordenadas: rest.incluir_coordenadas ?? true,
+    enriquecer_alertas: rest.enriquecer_alertas ?? true,
+  };
+
+  const resultado = await chamar(baseUrl, "/dashboard-v2/filtro", { method: "POST", body: bodyFiltro });
+  if (resultado.status >= 400) return resultado;
+
+  const payload = extrairPayloadVps(resultado.body);
+  const porId = new Map<string, Record<string, unknown>>();
+  for (const c of (payload.corridas as unknown[]) ?? []) {
+    if (c && typeof c === "object") {
+      const id = String((c as Record<string, unknown>).id ?? "");
+      if (id) porId.set(id, c as Record<string, unknown>);
+    }
+  }
+
+  const meta = (payload.meta as Record<string, unknown>) ?? {};
+  const total = Number(meta.total) || undefined;
+  const paginasMeta = Number(meta.paginas) || undefined;
+  const limite = paginasMeta ?? (total && porId.size ? Math.ceil(total / porId.size) : 1);
+
+  for (let pagina = 2; pagina <= Math.min(50, limite); pagina += 1) {
+    if (total && porId.size >= total) break;
+    const pag = await chamar(baseUrl, "/dashboard-v2/corridas", {
+      method: "POST",
+      body: {
+        session_token: sessionToken,
+        page: pagina,
+        incluir_coordenadas: bodyFiltro.incluir_coordenadas,
+        apenas_ativos_mapa: false,
+      },
+    });
+    if (pag.status >= 400) break;
+    const pp = extrairPayloadVps(pag.body);
+    const lote = (pp.corridas as unknown[]) ?? [];
+    if (!lote.length) break;
+    const antes = porId.size;
+    for (const c of lote) {
+      if (c && typeof c === "object") {
+        const id = String((c as Record<string, unknown>).id ?? "");
+        if (id) porId.set(id, c as Record<string, unknown>);
+      }
+    }
+    if (porId.size === antes) break;
+    if (total && porId.size >= total) break;
+  }
+
+  return {
+    status: 200,
+    body: {
+      sucesso: true,
+      corridas: Array.from(porId.values()),
+      meta: { ...meta, total_listado: porId.size },
+      filtro: payload.filtro,
+    },
+  };
+}
+
 async function executarComSessao(
   ctx: Ctx,
   sessionToken: string,
@@ -165,34 +236,14 @@ async function executarComSessao(
     case "bandeiras":
       return chamar(baseUrl, "/dashboard-v2/bandeiras", { query: { session_token: sessionToken } });
     case "filtro":
-      return chamar(baseUrl, "/dashboard-v2/filtro", {
-        method: "POST",
-        body: {
-          session_token: sessionToken,
-          bandeira_id: bandeira_id ?? rest.bandeira_id,
-          horas: rest.horas ?? 0.25,
-          filtro_matriz: rest.filtro_matriz,
-          incluir_coordenadas: rest.incluir_coordenadas ?? true,
-          enriquecer_alertas: rest.enriquecer_alertas ?? true,
-        },
-      });
+      return filtrarPaginadoCompleto(ctx, sessionToken, rest, bandeira_id);
     case "corridas": {
       const precisaFiltro =
         bandeira_id ||
         rest.horas != null ||
         rest.filtro_matriz != null;
       if (precisaFiltro) {
-        return chamar(baseUrl, "/dashboard-v2/filtro", {
-          method: "POST",
-          body: {
-            session_token: sessionToken,
-            bandeira_id: bandeira_id ?? rest.bandeira_id,
-            horas: rest.horas ?? 0.25,
-            filtro_matriz: rest.filtro_matriz,
-            incluir_coordenadas: rest.incluir_coordenadas ?? true,
-            enriquecer_alertas: rest.enriquecer_alertas ?? true,
-          },
-        });
+        return filtrarPaginadoCompleto(ctx, sessionToken, rest, bandeira_id);
       }
       return chamar(baseUrl, "/dashboard-v2/corridas", {
         method: "POST",
@@ -230,14 +281,7 @@ async function rodarAcao(ctx: Ctx, acao: Acao, rest: Record<string, unknown>) {
     let corridas: unknown = [];
     let meta: unknown = undefined;
     if (bandeira_id) {
-      const filtro = await chamar(ctx.creds.baseUrl, "/dashboard-v2/filtro", {
-        method: "POST",
-        body: {
-          session_token: sessao.token,
-          bandeira_id,
-          horas,
-        },
-      });
+      const filtro = await filtrarPaginadoCompleto(ctx, sessao.token, { horas }, bandeira_id);
       const filtroPayload = extrairPayloadVps(filtro.body);
       corridas = filtroPayload.corridas ?? [];
       meta = (filtroPayload.meta as Record<string, unknown> | undefined) ?? undefined;
