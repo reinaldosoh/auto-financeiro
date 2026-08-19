@@ -93,6 +93,7 @@ from machine_dashboard_http import (
     monitor_alertas_cidades,
     obter_bandeiras_historico,
     obter_detalhe_corrida,
+    obter_indicadores_operacao,
     obter_posicao_corrida,
 )
 from machine_notificacao_http import (
@@ -341,6 +342,12 @@ class DashboardV2MotoristasInput(BaseModel):
     horas: float = 0.25
     filtro_matriz: Optional[str] = None
     max_detalhes: int = 50
+
+
+class DashboardV2IndicadoresInput(BaseModel):
+    session_token: str
+    periodo: str = "ontem"
+    bandeira_id: Optional[str] = None
 
 
 class MonitorAlertasCidadeItem(BaseModel):
@@ -1300,6 +1307,23 @@ async def dashboard_v2_posicao(os_id: str, session_token: str):
             "lng_motorista": pos.get("lng_taxista"),
             "trajeto": pos.get("array_posicao") or [],
         }
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/dashboard-v2/indicadores")
+async def dashboard_v2_indicadores(inp: DashboardV2IndicadoresInput):
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: obter_indicadores_operacao(
+                http,
+                periodo=inp.periodo,
+                bandeira_id=inp.bandeira_id,
+            ),
+        )
     except Exception as e:
         raise _notificacao_http_erro(e)
 

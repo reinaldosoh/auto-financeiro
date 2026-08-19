@@ -17,7 +17,8 @@ type Acao =
   | "corridas"
   | "detalhe"
   | "posicao"
-  | "motoristas";
+  | "motoristas"
+  | "indicadores";
 
 type SupabaseAdmin = ReturnType<typeof createClient>;
 
@@ -273,6 +274,15 @@ async function executarComSessao(
           horas: rest.horas ?? 0.25,
           filtro_matriz: rest.filtro_matriz,
           max_detalhes: rest.max_detalhes ?? 50,
+        },
+      });
+    case "indicadores":
+      return chamar(baseUrl, "/dashboard-v2/indicadores", {
+        method: "POST",
+        body: {
+          session_token: sessionToken,
+          periodo: rest.periodo ?? "ontem",
+          bandeira_id: bandeira_id ?? rest.bandeira_id,
         },
       });
     default:

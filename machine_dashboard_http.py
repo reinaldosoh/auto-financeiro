@@ -768,3 +768,56 @@ def listar_motoristas_rastreio(
             "com_gps": len(motoristas),
         },
     }
+
+
+def obter_indicadores_operacao(
+    http: requests.Session,
+    *,
+    periodo: str = "ontem",
+    bandeira_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Indicadores do Painel Machine (POST/GET /site/estatistica, tipo=operacao).
+    Requer conta com permissão de Painel (operador); contas só API/banner retornam 403.
+    """
+    params: Dict[str, Any] = {
+        "periodo": periodo,
+        "tipo": "operacao",
+        "periodo_data_inicial": "",
+        "periodo_data_final": "",
+    }
+    if bandeira_id is not None and str(bandeira_id) != "":
+        params["bandeira_id"] = str(bandeira_id)
+
+    r = http.get(
+        BASE_URL + "/site/estatistica",
+        params=params,
+        headers={
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": BASE_URL + "/",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+        },
+        timeout=60,
+    )
+    if r.status_code == 403:
+        raise RuntimeError(
+            "Conta Machine sem permissão para Indicadores do Painel. "
+            "Use credencial de operador (menu Painel) em Integrações → Credencial Machine."
+        )
+    if r.status_code >= 400:
+        raise RuntimeError(f"Falha ao carregar indicadores Machine (HTTP {r.status_code}).")
+
+    try:
+        payload = r.json()
+    except Exception as exc:
+        raise RuntimeError("Resposta de indicadores Machine não é JSON válido.") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("Formato inesperado nos indicadores Machine.")
+
+    return {
+        "sucesso": True,
+        "periodo": periodo,
+        "bandeira_id": bandeira_id,
+        **payload,
+    }
