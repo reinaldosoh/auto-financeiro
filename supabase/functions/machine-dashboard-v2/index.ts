@@ -16,7 +16,8 @@ type Acao =
   | "filtro"
   | "corridas"
   | "detalhe"
-  | "posicao";
+  | "posicao"
+  | "motoristas";
 
 type SupabaseAdmin = ReturnType<typeof createClient>;
 
@@ -262,6 +263,17 @@ async function executarComSessao(
     case "posicao":
       return chamar(baseUrl, `/dashboard-v2/corridas/${encodeURIComponent(String(rest.os_id))}/posicao`, {
         query: { session_token: sessionToken },
+      });
+    case "motoristas":
+      return chamar(baseUrl, "/dashboard-v2/motoristas-rastreio", {
+        method: "POST",
+        body: {
+          session_token: sessionToken,
+          bandeira_id: bandeira_id ?? rest.bandeira_id,
+          horas: rest.horas ?? 0.25,
+          filtro_matriz: rest.filtro_matriz,
+          max_detalhes: rest.max_detalhes ?? 50,
+        },
       });
     default:
       throw new Error(`Ação não suportada: ${acao}`);

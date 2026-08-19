@@ -89,6 +89,7 @@ from machine_dashboard_http import (
     aplicar_filtro_corridas,
     listar_corridas,
     listar_corridas_todas,
+    listar_motoristas_rastreio,
     monitor_alertas_cidades,
     obter_bandeiras_historico,
     obter_detalhe_corrida,
@@ -332,6 +333,14 @@ class DashboardV2ListarInput(BaseModel):
     page: int = 1
     incluir_coordenadas: bool = True
     apenas_ativos_mapa: bool = False
+
+
+class DashboardV2MotoristasInput(BaseModel):
+    session_token: str
+    bandeira_id: Optional[str] = None
+    horas: float = 0.25
+    filtro_matriz: Optional[str] = None
+    max_detalhes: int = 50
 
 
 class MonitorAlertasCidadeItem(BaseModel):
@@ -1291,6 +1300,25 @@ async def dashboard_v2_posicao(os_id: str, session_token: str):
             "lng_motorista": pos.get("lng_taxista"),
             "trajeto": pos.get("array_posicao") or [],
         }
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/dashboard-v2/motoristas-rastreio")
+async def dashboard_v2_motoristas_rastreio(inp: DashboardV2MotoristasInput):
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            executor,
+            lambda: listar_motoristas_rastreio(
+                http,
+                bandeira_id=inp.bandeira_id,
+                horas=inp.horas,
+                filtro_matriz=inp.filtro_matriz,
+                max_detalhes=inp.max_detalhes,
+            ),
+        )
     except Exception as e:
         raise _notificacao_http_erro(e)
 

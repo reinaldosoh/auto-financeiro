@@ -278,7 +278,7 @@ def _enriquecer_alertas_via_detalhe(
             log.warning("alerta detalhe %s: %s", os_id, exc)
             return os_id, False
 
-    workers = min(6, len(alvos))
+    workers = min(2, len(alvos))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for os_id, tem in pool.map(_fetch, alvos):
             if not tem:
@@ -457,7 +457,7 @@ def _buscar_coordenadas_lote(http: requests.Session, ids: List[str]) -> Dict[str
             "status_codigo": pos.get("status_solicitacao"),
         }
 
-    workers = min(8, len(ids))
+    workers = min(2, len(ids))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_fetch, os_id): os_id for os_id in ids}
         for fut in as_completed(futures):
@@ -674,3 +674,83 @@ def monitor_alertas_cidades(
             erros.append({"cidade_id": cidade_id, "erro": str(exc)})
 
     return {"sucesso": True, "alertas": alertas, "erros": erros, "horas": horas}
+
+
+def listar_motoristas_rastreio(
+    http: requests.Session,
+    *,
+    bandeira_id: Optional[str] = None,
+    horas: float = 0.25,
+    filtro_matriz: Optional[str] = None,
+    max_detalhes: int = 50,
+) -> Dict[str, Any]:
+    """
+    Lista motoristas com link de rastreio em UMA sessão HTTP, sequencialmente.
+    Evita centenas de conexões paralelas à Machine (Errno 24 na VPS).
+    """
+    aplicar_filtro_corridas(
+        http,
+        bandeira_id=bandeira_id,
+        horas=horas,
+        filtro_matriz=filtro_matriz,
+    )
+    lista = listar_corridas_todas(
+        http,
+        incluir_coordenadas=False,
+        enriquecer_alertas=False,
+    )
+    candidatas = [
+        c
+        for c in lista.get("corridas") or []
+        if c.get("ativo_mapa")
+        and c.get("motorista")
+        and str(c.get("motorista")).strip()
+        and str(c.get("motorista")).strip() != "---"
+    ][:max_detalhes]
+
+    motoristas: List[Dict[str, Any]] = []
+    for c in candidatas:
+        os_id = str(c.get("id") or "")
+        if not os_id:
+            continue
+        try:
+            det = obter_detalhe_corrida(http, os_id)
+            link = det.get("link_rastreio")
+            if not link:
+                continue
+            pos = det.get("posicao") or {}
+            mot = det.get("motorista") or {}
+            veiculo = " · ".join(
+                x
+                for x in [mot.get("modelo"), mot.get("cor"), mot.get("placa")]
+                if x
+            )
+            motoristas.append(
+                {
+                    "id": os_id,
+                    "os": str(det.get("os") or c.get("os") or os_id),
+                    "motorista": mot.get("nome") or c.get("motorista"),
+                    "veiculo": veiculo,
+                    "link_rastreio": link,
+                    "status": det.get("status") or c.get("status"),
+                    "status_classe": c.get("status_classe") or "",
+                    "passageiro": (det.get("passageiro") or {}).get("nome") or c.get("passageiro"),
+                    "lat_motorista": pos.get("lat_motorista"),
+                    "lng_motorista": pos.get("lng_motorista"),
+                    "lat_partida": pos.get("lat_partida"),
+                    "lng_partida": pos.get("lng_partida"),
+                    "tem_alerta": bool(det.get("tem_alerta") or c.get("tem_alerta")),
+                    "ativo_mapa": True,
+                }
+            )
+        except Exception as exc:
+            log.warning("motoristas_rastreio %s: %s", os_id, exc)
+
+    return {
+        "sucesso": True,
+        "motoristas": motoristas,
+        "meta": {
+            "candidatas": len(candidatas),
+            "com_link": len(motoristas),
+        },
+    }
