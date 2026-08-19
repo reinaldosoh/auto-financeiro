@@ -441,6 +441,16 @@ def listar_corridas_todas(
 
 
 def _buscar_coordenadas_lote(http: requests.Session, ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    return _buscar_posicoes_motoristas_lote(http, ids, max_workers=2)
+
+
+def _buscar_posicoes_motoristas_lote(
+    http: requests.Session,
+    ids: List[str],
+    *,
+    max_workers: int = 3,
+) -> Dict[str, Dict[str, Any]]:
+    """Posição + veículo por OS, com concorrência limitada (1 request Machine por OS)."""
     if not ids:
         return {}
     out: Dict[str, Dict[str, Any]] = {}
@@ -454,10 +464,14 @@ def _buscar_coordenadas_lote(http: requests.Session, ids: List[str]) -> Dict[str
             "lng_partida": lng_p,
             "lat_motorista": lat_m,
             "lng_motorista": lng_m,
+            "motorista_nome": pos.get("nome_taxista"),
+            "placa": pos.get("placa"),
+            "modelo": pos.get("modelo"),
+            "cor": pos.get("cor"),
             "status_codigo": pos.get("status_solicitacao"),
         }
 
-    workers = min(2, len(ids))
+    workers = min(max_workers, len(ids))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_fetch, os_id): os_id for os_id in ids}
         for fut in as_completed(futures):
@@ -465,7 +479,7 @@ def _buscar_coordenadas_lote(http: requests.Session, ids: List[str]) -> Dict[str
                 os_id, data = fut.result()
                 out[os_id] = data
             except Exception as exc:
-                log.warning("coordenadas %s: %s", futures[fut], exc)
+                log.warning("posicao motorista %s: %s", futures[fut], exc)
     return out
 
 
@@ -685,8 +699,8 @@ def listar_motoristas_rastreio(
     max_detalhes: int = 50,
 ) -> Dict[str, Any]:
     """
-    Lista motoristas com link de rastreio em UMA sessão HTTP, sequencialmente.
-    Evita centenas de conexões paralelas à Machine (Errno 24 na VPS).
+    Motoristas ativos com GPS — posição em lote (sem detalhe HTML completo).
+    link_rastreio fica vazio aqui; o drawer busca detalhe sob demanda.
     """
     aplicar_filtro_corridas(
         http,
@@ -698,59 +712,59 @@ def listar_motoristas_rastreio(
         http,
         incluir_coordenadas=False,
         enriquecer_alertas=False,
+        apenas_ativos_mapa=True,
+        max_paginas=10,
     )
     candidatas = [
         c
         for c in lista.get("corridas") or []
-        if c.get("ativo_mapa")
-        and c.get("motorista")
+        if c.get("motorista")
         and str(c.get("motorista")).strip()
         and str(c.get("motorista")).strip() != "---"
     ][:max_detalhes]
+
+    ids = [str(c.get("id") or "") for c in candidatas if c.get("id")]
+    posicoes = _buscar_posicoes_motoristas_lote(http, ids, max_workers=3)
 
     motoristas: List[Dict[str, Any]] = []
     for c in candidatas:
         os_id = str(c.get("id") or "")
         if not os_id:
             continue
-        try:
-            det = obter_detalhe_corrida(http, os_id)
-            link = det.get("link_rastreio")
-            if not link:
-                continue
-            pos = det.get("posicao") or {}
-            mot = det.get("motorista") or {}
-            veiculo = " · ".join(
-                x
-                for x in [mot.get("modelo"), mot.get("cor"), mot.get("placa")]
-                if x
-            )
-            motoristas.append(
-                {
-                    "id": os_id,
-                    "os": str(det.get("os") or c.get("os") or os_id),
-                    "motorista": mot.get("nome") or c.get("motorista"),
-                    "veiculo": veiculo,
-                    "link_rastreio": link,
-                    "status": det.get("status") or c.get("status"),
-                    "status_classe": c.get("status_classe") or "",
-                    "passageiro": (det.get("passageiro") or {}).get("nome") or c.get("passageiro"),
-                    "lat_motorista": pos.get("lat_motorista"),
-                    "lng_motorista": pos.get("lng_motorista"),
-                    "lat_partida": pos.get("lat_partida"),
-                    "lng_partida": pos.get("lng_partida"),
-                    "tem_alerta": bool(det.get("tem_alerta") or c.get("tem_alerta")),
-                    "ativo_mapa": True,
-                }
-            )
-        except Exception as exc:
-            log.warning("motoristas_rastreio %s: %s", os_id, exc)
+        pos = posicoes.get(os_id) or {}
+        lat_m = pos.get("lat_motorista")
+        lng_m = pos.get("lng_motorista")
+        lat_p = pos.get("lat_partida")
+        lng_p = pos.get("lng_partida")
+        if (lat_m is None or lng_m is None) and (lat_p is None or lng_p is None):
+            continue
+        veiculo = " · ".join(
+            x for x in [pos.get("modelo"), pos.get("cor"), pos.get("placa")] if x
+        )
+        motoristas.append(
+            {
+                "id": os_id,
+                "os": str(c.get("os") or os_id),
+                "motorista": pos.get("motorista_nome") or c.get("motorista"),
+                "veiculo": veiculo,
+                "link_rastreio": "",
+                "status": c.get("status"),
+                "status_classe": c.get("status_classe") or "",
+                "passageiro": c.get("passageiro"),
+                "lat_motorista": lat_m,
+                "lng_motorista": lng_m,
+                "lat_partida": lat_p,
+                "lng_partida": lng_p,
+                "tem_alerta": bool(c.get("tem_alerta")),
+                "ativo_mapa": True,
+            }
+        )
 
     return {
         "sucesso": True,
         "motoristas": motoristas,
         "meta": {
             "candidatas": len(candidatas),
-            "com_link": len(motoristas),
+            "com_gps": len(motoristas),
         },
     }
