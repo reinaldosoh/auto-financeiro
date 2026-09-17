@@ -51,6 +51,8 @@ Endpoints:
     POST /notificacao/autenticar-acao - 2FA para ação sensível (envio)
     GET  /notificacao/listar          - Lista campanhas do painel
     DELETE /notificacao/{id}          - Cancela/exclui campanha agendada
+    GET  /passageiro/{id}             - Ficha cadastroPassageiro (session_token)
+    POST /passageiro/ficha            - Mesmo, body {session_token, id_machine}
     POST /dinamica/login              - Login HTTP (mesma sessão cookie do painel)
     GET  /dinamica/areas              - Lista áreas de tarifa dinâmica
     POST /dinamica/areas/ativar       - Ativa/desativa área específica
@@ -96,6 +98,7 @@ from machine_dashboard_http import (
     obter_indicadores_operacao,
     obter_posicao_corrida,
 )
+from machine_passageiro_http import obter_ficha_passageiro
 from machine_notificacao_http import (
     aguardar_relatorio,
     autenticar_acao_2fa,
@@ -320,6 +323,11 @@ class NotificacaoCancelarInput(BaseModel):
     destinatario: str = "D"
 
 
+class PassageiroFichaInput(BaseModel):
+    session_token: str
+    id_machine: str
+
+
 class DashboardV2FiltroInput(BaseModel):
     session_token: str
     bandeira_id: Optional[str] = None
@@ -327,6 +335,7 @@ class DashboardV2FiltroInput(BaseModel):
     filtro_matriz: Optional[str] = None
     incluir_coordenadas: bool = True
     enriquecer_alertas: bool = True
+    max_paginas: int = 30
 
 
 class DashboardV2ListarInput(BaseModel):
@@ -1216,6 +1225,32 @@ async def notificacao_cancelar(
         raise _notificacao_http_erro(e)
 
 
+@app.get("/passageiro/{id_machine}")
+async def passageiro_ficha_get(id_machine: str, session_token: str):
+    http = _require_session(session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        ficha = await loop.run_in_executor(
+            executor, lambda: obter_ficha_passageiro(http, id_machine)
+        )
+        return {"sucesso": True, **ficha}
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/passageiro/ficha")
+async def passageiro_ficha_post(inp: PassageiroFichaInput):
+    http = _require_session(inp.session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        ficha = await loop.run_in_executor(
+            executor, lambda: obter_ficha_passageiro(http, inp.id_machine)
+        )
+        return {"sucesso": True, **ficha}
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
 @app.get("/dashboard-v2/bandeiras")
 async def dashboard_v2_bandeiras(session_token: str):
     http = _require_session(session_token)
@@ -1248,6 +1283,7 @@ async def dashboard_v2_filtro(inp: DashboardV2FiltroInput):
                 incluir_coordenadas=inp.incluir_coordenadas,
                 apenas_ativos_mapa=False,
                 enriquecer_alertas=inp.enriquecer_alertas,
+                max_paginas=inp.max_paginas,
             ),
         )
         return {"sucesso": True, "filtro": resultado, **lista}
