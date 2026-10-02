@@ -55,6 +55,8 @@ Endpoints:
     POST /passageiro/ficha            - Mesmo, body {session_token, id_machine}
     POST /relatorio/clientes/solicitar - Exporta base de clientes (CSV S3); opcional aguardar_seg
     GET  /relatorio/clientes/status/{id} - Polling da exportação de clientes (url quando pronto)
+    POST /relatorio/corridas/solicitar - Exporta corridas dos últimos 90 dias (3 janelas até ontem), job em background
+    GET  /relatorio/corridas/status/{job_id} - Polling do job de corridas (1 url por janela)
     POST /dinamica/login              - Login HTTP (mesma sessão cookie do painel)
     GET  /dinamica/areas              - Lista áreas de tarifa dinâmica
     POST /dinamica/areas/ativar       - Ativa/desativa área específica
@@ -101,7 +103,17 @@ from machine_dashboard_http import (
     obter_posicao_corrida,
 )
 from machine_passageiro_http import obter_ficha_passageiro
-from machine_relatorio_http import AGUARDAR_MAX_SEG, solicitar_relatorio, verificar_relatorio
+from machine_relatorio_http import (
+    AGUARDAR_MAX_SEG,
+    CORRIDAS_QTD_JANELAS,
+    calcular_janelas_corridas,
+    exportar_corridas,
+    filtrar_corridas,
+    obter_my_user,
+    solicitar_relatorio,
+    status_corridas,
+    verificar_relatorio,
+)
 from machine_notificacao_http import (
     aguardar_relatorio,
     autenticar_acao_2fa,
@@ -127,6 +139,9 @@ import uuid
 import tempfile
 import os
 import urllib.request
+import secrets
+import time
+from datetime import date
 from typing import Any, Dict, List, Optional
 
 logging.basicConfig(
@@ -341,6 +356,25 @@ class RelatorioClientesInput(BaseModel):
     chave_secreta: Optional[str] = None
     filtros: Optional[Dict[str, Any]] = None
     aguardar_seg: int = 0
+
+
+class RelatorioCorridasInput(BaseModel):
+    """Use `session_token` ou `email` + `senha` (login automático)."""
+
+    session_token: Optional[str] = None
+    email: Optional[str] = None
+    senha: Optional[str] = None
+    codigo_2fa: Optional[str] = None
+    chave_secreta: Optional[str] = None
+    data_referencia: Optional[date] = None
+    qtd_janelas: int = CORRIDAS_QTD_JANELAS
+
+    @field_validator("qtd_janelas")
+    @classmethod
+    def _qtd_janelas_valida(cls, v: int) -> int:
+        if not 1 <= v <= 6:
+            raise ValueError("qtd_janelas deve estar entre 1 e 6")
+        return v
 
 
 class DashboardV2FiltroInput(BaseModel):
@@ -1240,7 +1274,7 @@ async def notificacao_cancelar(
         raise _notificacao_http_erro(e)
 
 
-async def _sessao_relatorio(inp: RelatorioClientesInput) -> tuple[str, Any]:
+async def _sessao_relatorio(inp: "RelatorioClientesInput | RelatorioCorridasInput") -> tuple[str, Any]:
     if inp.session_token:
         return inp.session_token, _require_session(inp.session_token)
     if not inp.email or not inp.senha:
@@ -1319,6 +1353,156 @@ async def relatorio_clientes_status(report_id: int, session_token: str):
         return {"sucesso": True, **st}
     except Exception as e:
         raise _notificacao_http_erro(e)
+
+
+JOB_CORRIDAS_TTL_SEG = 2 * 3600
+JANELA_CORRIDAS_TIMEOUT_SEG = 300
+_jobs_corridas: Dict[str, Dict[str, Any]] = {}
+_tasks_corridas: Dict[str, asyncio.Task] = {}
+
+
+def _limpar_jobs_corridas() -> None:
+    cutoff = time.time() - JOB_CORRIDAS_TTL_SEG
+    for job_id in [j for j, job in _jobs_corridas.items() if job["criado_em"] < cutoff and job["status"] != "processing"]:
+        _jobs_corridas.pop(job_id, None)
+        _tasks_corridas.pop(job_id, None)
+
+
+def _job_corridas_publico(job: Dict[str, Any]) -> Dict[str, Any]:
+    janelas = [
+        {
+            "inicio": j["inicio"].isoformat(),
+            "fim": j["fim"].isoformat(),
+            "etapa": j["etapa"],
+            "report_id": j["report_id"],
+            "url": j["url"],
+            "url_expira_em": j["url_expira_em"],
+            "erro": j["erro"],
+        }
+        for j in job["janelas"]
+    ]
+    return {
+        "sucesso": True,
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "erro": job["erro"],
+        "criado_em": int(job["criado_em"]),
+        "atualizado_em": int(job["atualizado_em"]),
+        "janelas": janelas,
+        "urls": [j["url"] for j in janelas if j["url"]],
+    }
+
+
+async def _aguardar_corridas(http, report_id: int, my_user: str, condicao, deadline: float) -> Dict[str, Any]:
+    loop = asyncio.get_event_loop()
+    while True:
+        st = await loop.run_in_executor(executor, lambda: status_corridas(http, report_id, my_user))
+        if st["cancelado"]:
+            raise RuntimeError(f"Relatório de corridas {report_id} foi cancelado pelo painel.")
+        if condicao(st):
+            return st
+        if loop.time() >= deadline:
+            raise RuntimeError(f"Tempo esgotado aguardando o relatório de corridas {report_id}.")
+        await asyncio.sleep(5.0)
+
+
+async def _executar_job_corridas(job: Dict[str, Any], http) -> None:
+    """Janelas em sequência: o painel guarda o filtro na sessão PHP."""
+    loop = asyncio.get_event_loop()
+    atual: Optional[Dict[str, Any]] = None
+    try:
+        my_user = await loop.run_in_executor(executor, lambda: obter_my_user(http))
+        for jan in job["janelas"]:
+            atual = jan
+            ini, fim = jan["inicio"], jan["fim"]
+            deadline = loop.time() + JANELA_CORRIDAS_TIMEOUT_SEG
+
+            jan["etapa"] = "filtrando"
+            filtro = await loop.run_in_executor(executor, lambda: filtrar_corridas(http, ini, fim))
+            jan["report_id"] = filtro["report_id"]
+            if not filtro["sincrono"]:
+                await _aguardar_corridas(http, filtro["report_id"], my_user, lambda st: st["filtro_pronto"], deadline)
+
+            jan["etapa"] = "exportando"
+            exp = await loop.run_in_executor(
+                executor, lambda: exportar_corridas(http, ini, fim, filtro["report_id"])
+            )
+            jan["report_id"] = exp["report_id"]
+            if not exp["url"]:
+                exp = await _aguardar_corridas(http, exp["report_id"], my_user, lambda st: st["pronto"], deadline)
+
+            jan.update(etapa="pronta", url=exp["url"], url_expira_em=exp["url_expira_em"])
+            job["atualizado_em"] = time.time()
+            log.info("job corridas %s janela %s..%s pronta", job["job_id"], ini, fim)
+        job["status"] = "ready"
+    except Exception as e:
+        log.warning("job corridas %s falhou: %s", job["job_id"], e)
+        if atual is not None:
+            atual.update(etapa="erro", erro=str(e))
+        job["status"] = "erro"
+        job["erro"] = str(e)
+    finally:
+        job["atualizado_em"] = time.time()
+
+
+@app.post("/relatorio/corridas/solicitar")
+async def relatorio_corridas_solicitar(inp: RelatorioCorridasInput):
+    """
+    Exporta as corridas dos últimos 90 dias em janelas mensais (máx. 31 dias cada,
+    limite do painel), terminando ontem 23:59 no fuso de São Paulo.
+
+    Responde na hora com `job_id`; acompanhe em GET /relatorio/corridas/status/{job_id}.
+    Cada janela leva ~1-2 min; as URLs S3 valem ~1 h após ficarem prontas.
+    """
+    log.info("POST /relatorio/corridas/solicitar email=%s ref=%s", inp.email, inp.data_referencia)
+    _limpar_jobs_corridas()
+    chave = (inp.email or (get_session_email(inp.session_token) if inp.session_token else "") or "").lower()
+    for job in _jobs_corridas.values():
+        if chave and job["chave"] == chave and job["status"] == "processing":
+            return {**_job_corridas_publico(job), "session_token": job["session_token"], "reaproveitado": True}
+
+    try:
+        janelas = calcular_janelas_corridas(inp.data_referencia, inp.qtd_janelas)
+        token, http = await _sessao_relatorio(inp)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Falha /relatorio/corridas/solicitar: %s", e)
+        raise _notificacao_http_erro(e)
+
+    agora = time.time()
+    job = {
+        "job_id": str(uuid.uuid4()),
+        "chave": chave or (get_session_email(token) or "").lower(),
+        "session_token": token,
+        "status": "processing",
+        "erro": None,
+        "criado_em": agora,
+        "atualizado_em": agora,
+        "janelas": [
+            {**j, "etapa": "aguardando", "report_id": None, "url": None, "url_expira_em": None, "erro": None}
+            for j in janelas
+        ],
+    }
+    _jobs_corridas[job["job_id"]] = job
+    _tasks_corridas[job["job_id"]] = asyncio.create_task(_executar_job_corridas(job, http))
+    return {**_job_corridas_publico(job), "session_token": token, "reaproveitado": False}
+
+
+@app.get("/relatorio/corridas/status/{job_id}")
+async def relatorio_corridas_status(job_id: str, session_token: str):
+    job = _jobs_corridas.get(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail={"sucesso": False, "mensagem": "job_id não encontrado ou expirado."},
+        )
+    if not secrets.compare_digest(job["session_token"], session_token):
+        raise HTTPException(
+            status_code=401,
+            detail={"sucesso": False, "mensagem": "session_token não corresponde a este job."},
+        )
+    return _job_corridas_publico(job)
 
 
 @app.get("/passageiro/{id_machine}")

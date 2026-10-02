@@ -113,6 +113,8 @@ A API aceita strings para `indice`, `headless` e `manter_aberto` (ex.: N8N) e co
 | POST | `/notificacao/categorias` | Igual ao GET; aceita credenciais ou `session_token` |
 | POST | `/relatorio/clientes/solicitar` | Exporta a base de clientes do painel (CSV no S3) |
 | GET | `/relatorio/clientes/status/{report_id}` | Status da exportação; `url` do CSV quando pronto |
+| POST | `/relatorio/corridas/solicitar` | Exporta corridas dos últimos 90 dias (3 janelas até ontem) em job de background |
+| GET | `/relatorio/corridas/status/{job_id}` | Status do job; 1 `url` de CSV por janela |
 
 ---
 
@@ -173,6 +175,77 @@ TOKEN=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin)['ses
 ID=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin)['report_id'])")
 
 curl -sS "$BASE/relatorio/clientes/status/$ID?session_token=$TOKEN"   # repetir até pronto=true
+```
+
+---
+
+## Exportação de corridas — últimos 90 dias (HTTP direto — sem Selenium)
+
+Replica **Filtro → Exportar relatório** de [`/solicitacao/historicoCorridas2`](https://cloud.taximachine.com.br/solicitacao/historicoCorridas2?resetSesion=1). O painel aceita no máximo **31 dias por filtro**, então a API divide os 90 dias em janelas mensais e roda uma por vez (o filtro fica na sessão PHP).
+
+**Regra das janelas** (fuso `America/Sao_Paulo`):
+
+- O dia atual está incompleto: a última janela termina **ontem 23:59**. Toda janela vai de `00:00` a `23:59`.
+- Janela *k*: início = hoje − (*k*+1) meses; fim = (hoje − *k* meses) − 1 dia. Contíguas, sem buraco nem sobreposição.
+- Rodando em **02/10/2026**: `02/09–01/10`, `02/08–01/09`, `02/07–01/08`.
+- Dia inexistente no mês cai no último dia (ex.: hoje 31/03 → `28/02–30/03`).
+
+Por janela: `relatorioCorridas` (filtro) → `statusRelatorioCorridas` até `status=ready` → `exportarRelatorioCorridas` → `statusRelatorioCorridas` até `statusExport=ready` + `url`. Cada janela leva ~1–2 min (Mariana: 3 janelas em ~4 min, ~36 mil corridas cada).
+
+- Formato: separador `;`, latin-1, 95 colunas (`Nº OS;...;Status;...;Momento da solicitação;...;Telefone do passageiro;...;E-mail de cadastro;...`) — o mesmo aceito pela importação RC.
+- Login e polling **rodam na VPS** (cookie preso ao IP); o CSV é baixado direto da `url` S3 (válida ~1 h — baixe logo após a janela ficar `pronta`).
+- **Radar:** chamar com as **credenciais da cidade** (`cidades.usuario` / `senha` / `automation_totp`, via `resolverCredenciaisCidadeDashboard`), **não** as de `/credencial-machine`.
+
+### `POST /relatorio/corridas/solicitar`
+
+| Campo           | Obrigatório | Descrição |
+|-----------------|-------------|-----------|
+| `session_token` | condicional | De `/notificacao/login` |
+| `email`/`senha` | condicional | Login automático se não enviar `session_token` |
+| `codigo_2fa` / `chave_secreta` | não | Contas com 2FA (a chave salva no servidor é usada se omitir) |
+| `data_referencia` | não | `aaaa-mm-dd` que faz papel de "hoje" (testes). Default: hoje em São Paulo |
+| `qtd_janelas`   | não | Default `3` (90 dias). Entre 1 e 6 |
+
+Responde **na hora** com o `job_id`. Se já houver job em andamento para o mesmo login, devolve esse job (`reaproveitado: true`) em vez de abrir outro — o painel só guarda um filtro por sessão.
+
+### `GET /relatorio/corridas/status/{job_id}?session_token=...`
+
+Use o `session_token` devolvido no POST (401 se não bater; 404 se o job expirou — jobs ficam 2 h em memória). Consulte a cada ~15 s.
+
+- `status`: `processing` → `ready` (todas as janelas com `url`) ou `erro` (campo `erro` + janela com `etapa: "erro"`).
+- `janelas[].etapa`: `aguardando` → `filtrando` → `exportando` → `pronta`.
+- Timeout de 5 min por janela.
+
+**Resposta (pronto):**
+
+```json
+{
+  "sucesso": true,
+  "job_id": "uuid...",
+  "status": "ready",
+  "erro": null,
+  "criado_em": 1790950200,
+  "atualizado_em": 1790950425,
+  "janelas": [
+    {"inicio": "2026-09-02", "fim": "2026-10-01", "etapa": "pronta", "report_id": 9876543,
+     "url": "https://cloud-machine-global.s3.amazonaws.com/reports/report9876543.csv?X-Amz-...",
+     "url_expira_em": 1790953829, "erro": null},
+    {"inicio": "2026-08-02", "fim": "2026-09-01", "etapa": "pronta", "...": "..."},
+    {"inicio": "2026-07-02", "fim": "2026-08-01", "etapa": "pronta", "...": "..."}
+  ],
+  "urls": ["https://...report9876543.csv?...", "https://...", "https://..."]
+}
+```
+
+**Exemplo:**
+
+```bash
+R=$(curl -sS -X POST "$BASE/relatorio/corridas/solicitar" -H "Content-Type: application/json" \
+  -d '{"email":"conta@exemplo.com","senha":"SUA_SENHA"}')
+JOB=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+TOKEN=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin)['session_token'])")
+
+curl -sS "$BASE/relatorio/corridas/status/$JOB?session_token=$TOKEN"   # repetir até status=ready
 ```
 
 ---
