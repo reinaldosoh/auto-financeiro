@@ -53,6 +53,8 @@ Endpoints:
     DELETE /notificacao/{id}          - Cancela/exclui campanha agendada
     GET  /passageiro/{id}             - Ficha cadastroPassageiro (session_token)
     POST /passageiro/ficha            - Mesmo, body {session_token, id_machine}
+    POST /relatorio/clientes/solicitar - Exporta base de clientes (CSV S3); opcional aguardar_seg
+    GET  /relatorio/clientes/status/{id} - Polling da exportação de clientes (url quando pronto)
     POST /dinamica/login              - Login HTTP (mesma sessão cookie do painel)
     GET  /dinamica/areas              - Lista áreas de tarifa dinâmica
     POST /dinamica/areas/ativar       - Ativa/desativa área específica
@@ -99,6 +101,7 @@ from machine_dashboard_http import (
     obter_posicao_corrida,
 )
 from machine_passageiro_http import obter_ficha_passageiro
+from machine_relatorio_http import AGUARDAR_MAX_SEG, solicitar_relatorio, verificar_relatorio
 from machine_notificacao_http import (
     aguardar_relatorio,
     autenticar_acao_2fa,
@@ -326,6 +329,18 @@ class NotificacaoCancelarInput(BaseModel):
 class PassageiroFichaInput(BaseModel):
     session_token: str
     id_machine: str
+
+
+class RelatorioClientesInput(BaseModel):
+    """Use `session_token` ou `email` + `senha` (login automático)."""
+
+    session_token: Optional[str] = None
+    email: Optional[str] = None
+    senha: Optional[str] = None
+    codigo_2fa: Optional[str] = None
+    chave_secreta: Optional[str] = None
+    filtros: Optional[Dict[str, Any]] = None
+    aguardar_seg: int = 0
 
 
 class DashboardV2FiltroInput(BaseModel):
@@ -1221,6 +1236,87 @@ async def notificacao_cancelar(
             executor,
             lambda: cancelar_notificacao(http, notificacao_id, destinatario),
         )
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+async def _sessao_relatorio(inp: RelatorioClientesInput) -> tuple[str, Any]:
+    if inp.session_token:
+        return inp.session_token, _require_session(inp.session_token)
+    if not inp.email or not inp.senha:
+        raise HTTPException(
+            status_code=400,
+            detail={"sucesso": False, "mensagem": "Informe session_token ou email + senha."},
+        )
+    loop = asyncio.get_event_loop()
+    login = await loop.run_in_executor(
+        executor,
+        lambda: login_painel(
+            email=inp.email,
+            senha=inp.senha,
+            codigo_2fa=inp.codigo_2fa,
+            chave_secreta=inp.chave_secreta,
+            gerar_codigo_fn=gerar_codigo,
+        ),
+    )
+    token = login["session_token"]
+    return token, _require_session(token)
+
+
+async def _aguardar_relatorio_async(http, tipo: str, report_id: int, timeout_seg: int) -> Dict[str, Any]:
+    """Polling sem prender worker do executor (Selenium) durante a espera."""
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + max(0, min(timeout_seg, AGUARDAR_MAX_SEG))
+    st = await loop.run_in_executor(executor, lambda: verificar_relatorio(http, tipo, report_id))
+    while not st["pronto"] and not st["cancelado"] and loop.time() < deadline:
+        await asyncio.sleep(min(10.0, max(0.0, deadline - loop.time())))
+        st = await loop.run_in_executor(executor, lambda: verificar_relatorio(http, tipo, report_id))
+    return st
+
+
+@app.post("/relatorio/clientes/solicitar")
+async def relatorio_clientes_solicitar(inp: RelatorioClientesInput):
+    """
+    Dispara a exportação da base de clientes (botão Exportar de /cliente/index).
+
+    `aguardar_seg=0` devolve o `report_id` na hora; >0 espera até o CSV ficar pronto
+    (máx. 240 s) e devolve a `url` S3 (válida ~1 h). Filtros vazios = base inteira.
+    """
+    log.info("POST /relatorio/clientes/solicitar email=%s aguardar=%s", inp.email, inp.aguardar_seg)
+    loop = asyncio.get_event_loop()
+    try:
+        token, http = await _sessao_relatorio(inp)
+        sol = await loop.run_in_executor(
+            executor, lambda: solicitar_relatorio(http, "clientes", inp.filtros)
+        )
+        out: Dict[str, Any] = {
+            "sucesso": True,
+            "session_token": token,
+            "report_id": sol["report_id"],
+            "status_export": sol["status_export"],
+            "pronto": False,
+            "url": None,
+        }
+        if inp.aguardar_seg > 0:
+            st = await _aguardar_relatorio_async(http, "clientes", sol["report_id"], inp.aguardar_seg)
+            out.update({k: st[k] for k in ("status_export", "pronto", "cancelado", "url", "url_expira_em")})
+        return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Falha /relatorio/clientes/solicitar: %s", e)
+        raise _notificacao_http_erro(e)
+
+
+@app.get("/relatorio/clientes/status/{report_id}")
+async def relatorio_clientes_status(report_id: int, session_token: str):
+    http = _require_session(session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        st = await loop.run_in_executor(
+            executor, lambda: verificar_relatorio(http, "clientes", report_id)
+        )
+        return {"sucesso": True, **st}
     except Exception as e:
         raise _notificacao_http_erro(e)
 

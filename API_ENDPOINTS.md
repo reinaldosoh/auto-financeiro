@@ -111,6 +111,69 @@ A API aceita strings para `indice`, `headless` e `manter_aberto` (ex.: N8N) e co
 | POST | `/notificacao/login` | Login HTTP no painel (cookie, **sem Selenium**) |
 | GET | `/notificacao/categorias` | Categorias para filtros de notificação em massa |
 | POST | `/notificacao/categorias` | Igual ao GET; aceita credenciais ou `session_token` |
+| POST | `/relatorio/clientes/solicitar` | Exporta a base de clientes do painel (CSV no S3) |
+| GET | `/relatorio/clientes/status/{report_id}` | Status da exportação; `url` do CSV quando pronto |
+
+---
+
+## Exportação de clientes (HTTP direto — sem Selenium)
+
+Replica o botão **Exportar** de [`/cliente/index`](https://cloud.taximachine.com.br/cliente/index). O painel gera o arquivo em background (tempo varia por cidade; Mariana ~47 mil clientes ≈ 20 s) e devolve um link S3 pré-assinado.
+
+- Login, solicitação e polling **precisam rodar na VPS**: o `PHPSESSID` fica preso ao IP de quem logou.
+- O CSV **não passa pela VPS**: quem chama baixa direto da `url` (válida ~1 h, sem cookie).
+- Formato: separador `;`, encoding latin-1, 28 colunas (`Nome;Telefone;E-mail;Gênero;...;ID;Qtd. corridas finalizadas;...;Versão do aplicativo`) — o mesmo aceito pela importação RC.
+
+### `POST /relatorio/clientes/solicitar`
+
+| Campo           | Obrigatório | Descrição |
+|-----------------|-------------|-----------|
+| `session_token` | condicional | De `/notificacao/login` |
+| `email`/`senha` | condicional | Login automático se não enviar `session_token` |
+| `codigo_2fa` / `chave_secreta` | não | Contas com 2FA (a chave salva no servidor é usada se omitir) |
+| `filtros`       | não | Objeto com qualquer um de: `nome`, `telefone`, `email`, `cpf`, `status_cliente` (`"null"` = todos), `tipo_cliente`, `bandeira_configuracao_id`, `incluir_cliente_com_cartao_nao_validado`, `criado_em_ini`, `criado_em_fim`, `data_nascimento_ini`, `data_nascimento_fim` (datas `dd/mm/aaaa`). Vazio = base inteira |
+| `aguardar_seg`  | não | `0` (default) devolve só o `report_id`; `>0` espera o CSV ficar pronto (máx. 240) |
+
+**Resposta:**
+
+```json
+{
+  "sucesso": true,
+  "session_token": "uuid...",
+  "report_id": 4739424,
+  "status_export": "ready",
+  "pronto": true,
+  "cancelado": false,
+  "url": "https://cloud-machine-global.s3.amazonaws.com/reports/report4739424.csv?X-Amz-...",
+  "url_expira_em": 1790946000
+}
+```
+
+### `GET /relatorio/clientes/status/{report_id}?session_token=...`
+
+`status_export`: `generate` → `processing` → `ready` (ou `canceled`). `pronto=true` só quando há `url`. Consulte a cada ~10 s.
+
+**Exemplo — uma chamada, espera até 2 min e baixa o CSV:**
+
+```bash
+URL=$(curl -sS -X POST "$BASE/relatorio/clientes/solicitar" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"conta@exemplo.com","senha":"SUA_SENHA","aguardar_seg":120}' \
+  --max-time 300 | python3 -c "import sys,json; print(json.load(sys.stdin)['url'] or '')")
+
+curl -sS -o clientes.csv "$URL"
+```
+
+**Exemplo — cidades grandes (sem prender a requisição):**
+
+```bash
+R=$(curl -sS -X POST "$BASE/relatorio/clientes/solicitar" -H "Content-Type: application/json" \
+  -d '{"email":"conta@exemplo.com","senha":"SUA_SENHA"}')
+TOKEN=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin)['session_token'])")
+ID=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin)['report_id'])")
+
+curl -sS "$BASE/relatorio/clientes/status/$ID?session_token=$TOKEN"   # repetir até pronto=true
+```
 
 ---
 
