@@ -245,20 +245,50 @@ def _form_corridas(inicio: date, fim: date, report: Optional[int | str] = None) 
     return form
 
 
-def obter_my_user(http: requests.Session) -> str:
-    """ID do usuário logado (`MY_USER` no JS da página), exigido no polling de status."""
-    r = http.get(
-        BASE_URL + CORRIDAS_REFERER,
-        params={"resetSesion": "1"},
-        headers={"Referer": BASE_URL + CORRIDAS_REFERER},
-        timeout=60,
+_RE_MY_USER = re.compile(r"MY_USER\s*[=:]\s*['\"]?(\d+)")
+
+
+def _resumo_pagina(r: requests.Response) -> str:
+    texto = r.text or ""
+    titulo = re.search(r"<title[^>]*>(.*?)</title>", texto, re.I | re.S)
+    t = re.sub(r"\s+", " ", titulo.group(1)).strip()[:80] if titulo else "sem título"
+    caminho = re.sub(r"^https?://[^/]+", "", r.url or "")[:80]
+    return f"HTTP {r.status_code} em {caminho or '?'} ({t})"
+
+
+def obter_my_user(http: requests.Session) -> Optional[str]:
+    """
+    ID do usuário logado (`MY_USER` no JS da página), usado no polling de status.
+    Algumas contas não expõem a variável: devolve None e o polling segue sem `user`.
+    """
+    tentativas = (
+        (CORRIDAS_REFERER, {"resetSesion": "1"}),
+        (CORRIDAS_REFERER, None),
+        ("/", None),
     )
-    if "site/login" in (r.url or "") or "LoginForm" in (r.text or "")[:20000]:
-        raise RuntimeError("Sessão inválida ou expirada — faça login novamente.")
-    m = re.search(r"MY_USER\s*=\s*['\"]?(\d+)", r.text or "")
-    if not m:
-        raise RuntimeError("Não foi possível identificar o usuário do painel (MY_USER).")
-    return m.group(1)
+    resumos = []
+    for caminho, params in tentativas:
+        r = http.get(
+            BASE_URL + caminho,
+            params=params,
+            headers={"Referer": BASE_URL + CORRIDAS_REFERER},
+            timeout=60,
+        )
+        if "site/login" in (r.url or "") or "LoginForm" in (r.text or "")[:20000]:
+            raise RuntimeError("Sessão inválida ou expirada — faça login novamente.")
+        if caminho == CORRIDAS_REFERER and (
+            r.status_code == 403 or "não está autorizado" in (r.text or "")[:50000]
+        ):
+            raise RuntimeError(
+                "Login da cidade sem permissão para o Histórico de corridas na Machine "
+                f"({_resumo_pagina(r)})."
+            )
+        m = _RE_MY_USER.search(r.text or "")
+        if m:
+            return m.group(1)
+        resumos.append(_resumo_pagina(r))
+    log.warning("MY_USER não encontrado: %s", " | ".join(resumos))
+    return None
 
 
 def filtrar_corridas(http: requests.Session, inicio: date, fim: date) -> Dict[str, Any]:
@@ -281,10 +311,13 @@ def filtrar_corridas(http: requests.Session, inicio: date, fim: date) -> Dict[st
     }
 
 
-def status_corridas(http: requests.Session, report_id: int | str, my_user: str) -> Dict[str, Any]:
+def status_corridas(http: requests.Session, report_id: int | str, my_user: Optional[str]) -> Dict[str, Any]:
+    params: Dict[str, Any] = {"report": report_id}
+    if my_user:
+        params["user"] = my_user
     r = http.get(
         BASE_URL + "/solicitacao/statusRelatorioCorridas",
-        params={"report": report_id, "user": my_user},
+        params=params,
         headers=_headers_corridas(),
         timeout=30,
     )
