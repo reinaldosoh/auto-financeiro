@@ -356,6 +356,8 @@ class RelatorioClientesInput(BaseModel):
     chave_secreta: Optional[str] = None
     filtros: Optional[Dict[str, Any]] = None
     aguardar_seg: int = 0
+    # Login de admin enxerga todas as centrais: restringe a exportação a uma bandeira.
+    bandeira_id: Optional[str] = None
 
 
 class RelatorioCorridasInput(BaseModel):
@@ -368,6 +370,7 @@ class RelatorioCorridasInput(BaseModel):
     chave_secreta: Optional[str] = None
     data_referencia: Optional[date] = None
     qtd_janelas: int = CORRIDAS_QTD_JANELAS
+    bandeira_id: Optional[str] = None
 
     @field_validator("qtd_janelas")
     @classmethod
@@ -1320,12 +1323,16 @@ async def relatorio_clientes_solicitar(inp: RelatorioClientesInput):
     loop = asyncio.get_event_loop()
     try:
         token, http = await _sessao_relatorio(inp)
+        filtros = dict(inp.filtros or {})
+        if inp.bandeira_id:
+            filtros["bandeira_configuracao_id"] = inp.bandeira_id
         sol = await loop.run_in_executor(
-            executor, lambda: solicitar_relatorio(http, "clientes", inp.filtros)
+            executor, lambda: solicitar_relatorio(http, "clientes", filtros)
         )
         out: Dict[str, Any] = {
             "sucesso": True,
             "session_token": token,
+            "bandeira_id": inp.bandeira_id,
             "report_id": sol["report_id"],
             "status_export": sol["status_export"],
             "pronto": False,
@@ -1384,6 +1391,7 @@ def _job_corridas_publico(job: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "sucesso": True,
         "job_id": job["job_id"],
+        "bandeira_id": job.get("bandeira_id"),
         "status": job["status"],
         "erro": job["erro"],
         "criado_em": int(job["criado_em"]),
@@ -1418,14 +1426,16 @@ async def _executar_job_corridas(job: Dict[str, Any], http) -> None:
             deadline = loop.time() + JANELA_CORRIDAS_TIMEOUT_SEG
 
             jan["etapa"] = "filtrando"
-            filtro = await loop.run_in_executor(executor, lambda: filtrar_corridas(http, ini, fim))
+            filtro = await loop.run_in_executor(
+                executor, lambda: filtrar_corridas(http, ini, fim, job.get("bandeira_id"))
+            )
             jan["report_id"] = filtro["report_id"]
             if not filtro["sincrono"]:
                 await _aguardar_corridas(http, filtro["report_id"], my_user, lambda st: st["filtro_pronto"], deadline)
 
             jan["etapa"] = "exportando"
             exp = await loop.run_in_executor(
-                executor, lambda: exportar_corridas(http, ini, fim, filtro["report_id"])
+                executor, lambda: exportar_corridas(http, ini, fim, filtro["report_id"], job.get("bandeira_id"))
             )
             jan["report_id"] = exp["report_id"]
             if not exp["url"]:
@@ -1456,7 +1466,8 @@ async def relatorio_corridas_solicitar(inp: RelatorioCorridasInput):
     """
     log.info("POST /relatorio/corridas/solicitar email=%s ref=%s", inp.email, inp.data_referencia)
     _limpar_jobs_corridas()
-    chave = (inp.email or (get_session_email(inp.session_token) if inp.session_token else "") or "").lower()
+    email_chave = (inp.email or (get_session_email(inp.session_token) if inp.session_token else "") or "").lower()
+    chave = f"{email_chave}|{inp.bandeira_id or ''}" if email_chave else ""
     for job in _jobs_corridas.values():
         if chave and job["chave"] == chave and job["status"] == "processing":
             return {**_job_corridas_publico(job), "session_token": job["session_token"], "reaproveitado": True}
@@ -1473,7 +1484,8 @@ async def relatorio_corridas_solicitar(inp: RelatorioCorridasInput):
     agora = time.time()
     job = {
         "job_id": str(uuid.uuid4()),
-        "chave": chave or (get_session_email(token) or "").lower(),
+        "chave": chave or f"{(get_session_email(token) or '').lower()}|{inp.bandeira_id or ''}",
+        "bandeira_id": inp.bandeira_id,
         "session_token": token,
         "status": "processing",
         "erro": None,

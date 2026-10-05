@@ -230,7 +230,12 @@ def _headers_corridas() -> Dict[str, str]:
     }
 
 
-def _form_corridas(inicio: date, fim: date, report: Optional[int | str] = None) -> Dict[str, str]:
+def _form_corridas(
+    inicio: date,
+    fim: date,
+    report: Optional[int | str] = None,
+    bandeira_id: Optional[str] = None,
+) -> Dict[str, str]:
     campos = {c: "" for c in _CAMPOS_FILTRO_CORRIDAS}
     campos.update(
         inicio_corrida=inicio.strftime("%d/%m/%Y"),
@@ -239,6 +244,7 @@ def _form_corridas(inicio: date, fim: date, report: Optional[int | str] = None) 
         hora_final="23:59",
         corridas_cashback="0",
         report="" if report is None else str(report),
+        bandeira_chamada_id=bandeira_id or "",
     )
     form = {f"HistoricoFilterForm[{k}]": v for k, v in campos.items()}
     form["tipo"] = "corrida"
@@ -291,10 +297,12 @@ def obter_my_user(http: requests.Session) -> Optional[str]:
     return None
 
 
-def filtrar_corridas(http: requests.Session, inicio: date, fim: date) -> Dict[str, Any]:
+def filtrar_corridas(
+    http: requests.Session, inicio: date, fim: date, bandeira_id: Optional[str] = None
+) -> Dict[str, Any]:
     r = http.post(
         BASE_URL + "/solicitacao/relatorioCorridas",
-        data=_form_corridas(inicio, fim),
+        data=_form_corridas(inicio, fim, bandeira_id=bandeira_id),
         headers=_headers_corridas(),
         timeout=60,
     )
@@ -340,10 +348,16 @@ def status_corridas(http: requests.Session, report_id: int | str, my_user: Optio
     }
 
 
-def exportar_corridas(http: requests.Session, inicio: date, fim: date, report_id: int | str) -> Dict[str, Any]:
+def exportar_corridas(
+    http: requests.Session,
+    inicio: date,
+    fim: date,
+    report_id: int | str,
+    bandeira_id: Optional[str] = None,
+) -> Dict[str, Any]:
     r = http.post(
         BASE_URL + "/solicitacao/exportarRelatorioCorridas",
-        data=_form_corridas(inicio, fim, report_id),
+        data=_form_corridas(inicio, fim, report_id, bandeira_id),
         headers=_headers_corridas(),
         timeout=60,
     )
