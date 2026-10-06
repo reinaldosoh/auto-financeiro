@@ -186,6 +186,17 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
         self.assertIn("query", r.json()["detail"]["mensagem"].lower())
 
+    def test_dashboard_body_accepts_header_only_session(self):
+        token = "01234567-89ab-cdef-0123-456789abcdef"
+        with patch.object(api_server, "get_session", return_value=None):
+            r = self.client.post(
+                "/dashboard-v2/motoristas-rastreio",
+                headers={**self.headers, machine_limits.SESSION_HEADER: token},
+                json={"bandeira_id": "3085", "horas": 0.25},
+            )
+        self.assertNotEqual(r.status_code, 422, r.text)
+        self.assertEqual(r.status_code, 401)
+
     def test_session_token_body_rejected(self):
         token = "01234567-89ab-cdef-0123-456789abcdef"
         r = self.client.post(

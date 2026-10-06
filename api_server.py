@@ -344,7 +344,7 @@ class NotificacaoSessionInput(BaseModel):
 
 
 class NotificacaoCampanhaInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     titulo: Optional[str] = ""
     mensagem: str
     destinatario: str = "D"
@@ -373,24 +373,24 @@ class NotificacaoAgendarInput(NotificacaoCampanhaInput):
 
 
 class NotificacaoAguardarInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     report_id: int
     timeout_seg: int = 120
 
 
 class NotificacaoAutenticarAcaoInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     codigo_2fa: Optional[str] = None
     chave_secreta: Optional[str] = None
 
 
 class NotificacaoCancelarInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     destinatario: str = "D"
 
 
 class PassageiroFichaInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     id_machine: str
 
 
@@ -429,7 +429,7 @@ class RelatorioCorridasInput(BaseModel):
 
 
 class DashboardV2FiltroInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     bandeira_id: Optional[str] = None
     horas: float = 0.25
     filtro_matriz: Optional[str] = None
@@ -439,14 +439,14 @@ class DashboardV2FiltroInput(BaseModel):
 
 
 class DashboardV2ListarInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     page: int = 1
     incluir_coordenadas: bool = True
     apenas_ativos_mapa: bool = False
 
 
 class DashboardV2MotoristasInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     bandeira_id: Optional[str] = None
     horas: float = 0.25
     filtro_matriz: Optional[str] = None
@@ -454,7 +454,7 @@ class DashboardV2MotoristasInput(BaseModel):
 
 
 class DashboardV2IndicadoresInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     periodo: str = "ontem"
     bandeira_id: Optional[str] = None
 
@@ -468,13 +468,13 @@ class MonitorAlertasCidadeItem(BaseModel):
 
 
 class MonitorAlertasEmpresaInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     cidades: list[MonitorAlertasCidadeItem]
     horas: float = 4
 
 
 class DinamicaAtivarAreaInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     bandeira_id: str
     fator_id: str
     area_id: str
@@ -487,7 +487,7 @@ class DinamicaVerticeInput(BaseModel):
 
 
 class DinamicaEditarFatorInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     bandeira_id: str
     fator_id: str
     area_id: str
@@ -497,7 +497,7 @@ class DinamicaEditarFatorInput(BaseModel):
 
 
 class DinamicaEditarAreaInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     bandeira_id: str
     fator_id: str
     area_id: str
@@ -512,7 +512,7 @@ class DinamicaEditarAreaInput(BaseModel):
 
 
 class DinamicaCriarAreaInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     bandeira_id: str
     nome_area: str
     fator: str
@@ -524,7 +524,7 @@ class DinamicaCriarAreaInput(BaseModel):
 
 
 class DinamicaApagarAreaInput(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
     bandeira_id: str
     fator_id: str
     area_id: str
