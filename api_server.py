@@ -4,7 +4,7 @@ API FastAPI para disparar a automação de 2FA e anúncios no TaxiMachine.
 Primeiro acesso (conta com 2FA, usuário só tem email e senha):
     1) Chame POST {BASE_URL}/autenticar com {"email", "senha"} — sem chave_secreta.
        A automação conclui o assistente de 2FA no TaxiMachine, obtém o segredo TOTP e
-       grava em chaves_totp.json no disco do servidor (o corpo de resposta também traz chave_totp).
+       grava TOTP criptografado no disco do servidor (TOTP_STORE_PATH) (o corpo de resposta também traz chave_totp).
     2) Nas rotas seguintes (anúncio, remover, etc.), envie só email e senha; omita chave_secreta.
        O servidor usa o segredo já salvo. Opcional: continue enviando chave_secreta se quiser
        sobrescrever/forçar um segredo conhecido.
@@ -12,10 +12,11 @@ Primeiro acesso (conta com 2FA, usuário só tem email e senha):
     senão a chave se perde a cada redeploy e o passo (1) precisa ser refeito.
 
 Uso local:
-    uvicorn api_server:app --host 0.0.0.0 --port 8000 --reload
+    MACHINE_API_KEY=<server-only-secret> uvicorn api_server:app --host 127.0.0.1 --port 8000
 
 Chamada externa (substitua BASE_URL pela URL pública do serviço, ex. Easypanel):
     POST {BASE_URL}/anuncio-passageiro
+    X-API-Key: <segredo server-to-server>
     Content-Type: application/json
     Corpo JSON (campos principais):
       email, senha, chave_secreta (opcional após /autenticar ter gravado a chave no servidor),
@@ -72,7 +73,9 @@ Endpoints:
 
 import threading
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from api_security import require_api_key, AuthenticatedBodyLimit
+from safe_image import prepare_image, ImageRejected
 from pydantic import BaseModel, EmailStr, field_validator
 from auto_2fa import executar_automacao, executar_login, executar_login_recursos_premium, carregar_chaves, obter_chave, gerar_codigo
 from machine_bandeira_http import (
@@ -155,7 +158,11 @@ app = FastAPI(
     title="TaxiMachine 2FA Automação",
     description="API para automatizar o processo de configuração 2FA no TaxiMachine",
     version="1.0.0",
+    dependencies=[Depends(require_api_key)],
+    docs_url=None, redoc_url=None, openapi_url=None,
 )
+
+app.add_middleware(AuthenticatedBodyLimit)
 
 executor = ThreadPoolExecutor(max_workers=3)
 
@@ -549,7 +556,9 @@ async def login(creds: CredenciaisInput):
 
 @app.get("/chaves")
 async def listar_chaves():
-    """Lista todos os emails que têm chave TOTP salva."""
+    """Disabled unless explicitly needed by a trusted operator."""
+    if os.environ.get("MACHINE_ENABLE_TOTP_ADMIN") != "1":
+        raise HTTPException(404, "Not found")
     dados = carregar_chaves()
     return {
         "total": len(dados),
@@ -567,6 +576,8 @@ async def gerar_codigo_endpoint(inp: CodigoInput):
     Gera o código TOTP de 6 dígitos para um email com chave salva.
     Útil para obter o código sem abrir o browser.
     """
+    if os.environ.get("MACHINE_ENABLE_TOTP_ADMIN") != "1":
+        raise HTTPException(404, "Not found")
     chave = obter_chave(inp.email)
     if not chave:
         return {"sucesso": False, "codigo": "", "mensagem": "Chave TOTP não encontrada para este email."}
@@ -606,7 +617,7 @@ async def recursos_premium(creds: CredenciaisInput):
     except Exception as e:
         log.error("Erro na thread /recursos-premium: %s", e)
         raise HTTPException(
-            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+            status_code=500, detail={"sucesso": False, "mensagem": "Erro interno no serviço"}
         )
 
 @app.post("/anuncio-motorista", response_model=ResultadoOutput)
@@ -622,27 +633,10 @@ async def anuncio_motorista(input_data: AnuncioMotoristaInput):
 
     tmp_imagem_path = os.path.join(tempfile.gettempdir(), f"anuncio_{uuid.uuid4().hex}.png")
 
-    if input_data.imagem_base64:
-        try:
-            # Em caso de enviar prefixo data:image/png;base64,
-            base64_data = input_data.imagem_base64
-            if "," in base64_data:
-                base64_data = base64_data.split(",")[1]
-            with open(tmp_imagem_path, "wb") as f:
-                f.write(base64.b64decode(base64_data))
-        except Exception as e:
-            raise HTTPException(status_code=400, detail={"sucesso": False, "mensagem": f"Erro ao decodificar imagem base64: {e}"})
-    elif input_data.imagem_url:
-        try:
-            import requests as req_lib
-            r = req_lib.get(input_data.imagem_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30, verify=False)
-            r.raise_for_status()
-            with open(tmp_imagem_path, "wb") as out_file:
-                out_file.write(r.content)
-        except Exception as e:
-            if os.path.exists(tmp_imagem_path):
-                os.remove(tmp_imagem_path)
-            raise HTTPException(status_code=400, detail={"sucesso": False, "mensagem": f"Erro ao baixar imagem da URL: {e}"})
+    try:
+        await asyncio.to_thread(prepare_image, tmp_imagem_path, input_data.imagem_url, input_data.imagem_base64)
+    except ImageRejected as exc:
+        raise HTTPException(status_code=400, detail={"sucesso": False, "mensagem": str(exc)}) from None
 
     from functools import partial
     loop = asyncio.get_event_loop()
@@ -673,7 +667,7 @@ async def anuncio_motorista(input_data: AnuncioMotoristaInput):
     except Exception as e:
         log.error("Erro na thread /anuncio-motorista: %s", e)
         raise HTTPException(
-            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+            status_code=500, detail={"sucesso": False, "mensagem": "Erro interno no serviço"}
         )
     finally:
         if os.path.exists(tmp_imagem_path):
@@ -711,7 +705,7 @@ async def remover_anuncio(creds: RemoverAnuncioInput):
     except Exception as e:
         log.error("Erro na thread /remover-anuncio: %s", e)
         raise HTTPException(
-            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+            status_code=500, detail={"sucesso": False, "mensagem": "Erro interno no serviço"}
         )
 
 
@@ -734,26 +728,10 @@ async def anuncio_passageiro(input_data: AnuncioMotoristaInput):
 
     tmp_imagem_path = os.path.join(tempfile.gettempdir(), f"anuncio_pass_{uuid.uuid4().hex}.png")
 
-    if input_data.imagem_base64:
-        try:
-            base64_data = input_data.imagem_base64
-            if "," in base64_data:
-                base64_data = base64_data.split(",")[1]
-            with open(tmp_imagem_path, "wb") as f:
-                f.write(base64.b64decode(base64_data))
-        except Exception as e:
-            raise HTTPException(status_code=400, detail={"sucesso": False, "mensagem": f"Erro ao decodificar imagem base64: {e}"})
-    elif input_data.imagem_url:
-        try:
-            import requests as req_lib
-            r = req_lib.get(input_data.imagem_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30, verify=False)
-            r.raise_for_status()
-            with open(tmp_imagem_path, "wb") as out_file:
-                out_file.write(r.content)
-        except Exception as e:
-            if os.path.exists(tmp_imagem_path):
-                os.remove(tmp_imagem_path)
-            raise HTTPException(status_code=400, detail={"sucesso": False, "mensagem": f"Erro ao baixar imagem da URL: {e}"})
+    try:
+        await asyncio.to_thread(prepare_image, tmp_imagem_path, input_data.imagem_url, input_data.imagem_base64)
+    except ImageRejected as exc:
+        raise HTTPException(status_code=400, detail={"sucesso": False, "mensagem": str(exc)}) from None
 
     from functools import partial
     loop = asyncio.get_event_loop()
@@ -783,7 +761,7 @@ async def anuncio_passageiro(input_data: AnuncioMotoristaInput):
     except Exception as e:
         log.error("Erro na thread /anuncio-passageiro: %s", e)
         raise HTTPException(
-            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+            status_code=500, detail={"sucesso": False, "mensagem": "Erro interno no serviço"}
         )
     finally:
         if os.path.exists(tmp_imagem_path):
@@ -811,38 +789,10 @@ async def banner_corrida(input_data: BannerCorridaInput):
 
     tmp_imagem_path = os.path.join(tempfile.gettempdir(), f"banner_corrida_{uuid.uuid4().hex}.png")
 
-    if input_data.imagem_base64:
-        try:
-            base64_data = input_data.imagem_base64
-            if "," in base64_data:
-                base64_data = base64_data.split(",")[1]
-            with open(tmp_imagem_path, "wb") as f:
-                f.write(base64.b64decode(base64_data))
-        except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail={"sucesso": False, "mensagem": f"Erro ao decodificar imagem base64: {e}"},
-            )
-    elif input_data.imagem_url:
-        try:
-            import requests as req_lib
-
-            r = req_lib.get(
-                input_data.imagem_url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=30,
-                verify=False,
-            )
-            r.raise_for_status()
-            with open(tmp_imagem_path, "wb") as out_file:
-                out_file.write(r.content)
-        except Exception as e:
-            if os.path.exists(tmp_imagem_path):
-                os.remove(tmp_imagem_path)
-            raise HTTPException(
-                status_code=400,
-                detail={"sucesso": False, "mensagem": f"Erro ao baixar imagem da URL: {e}"},
-            )
+    try:
+        await asyncio.to_thread(prepare_image, tmp_imagem_path, input_data.imagem_url, input_data.imagem_base64)
+    except ImageRejected as exc:
+        raise HTTPException(status_code=400, detail={"sucesso": False, "mensagem": str(exc)}) from None
 
     from functools import partial
 
@@ -874,7 +824,7 @@ async def banner_corrida(input_data: BannerCorridaInput):
     except Exception as e:
         log.error("Erro na thread /banner-corrida: %s", e)
         raise HTTPException(
-            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+            status_code=500, detail={"sucesso": False, "mensagem": "Erro interno no serviço"}
         )
     finally:
         if os.path.exists(tmp_imagem_path):
@@ -919,7 +869,7 @@ async def remover_banner_corrida_endpoint(creds: RemoverAnuncioInput):
     except Exception as e:
         log.error("Erro na thread /remover-banner-corrida: %s", e)
         raise HTTPException(
-            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+            status_code=500, detail={"sucesso": False, "mensagem": "Erro interno no serviço"}
         )
 
 
@@ -960,13 +910,13 @@ async def remover_anuncio_passageiro_endpoint(creds: RemoverAnuncioInput):
     except Exception as e:
         log.error("Erro na thread /remover-anuncio-passageiro: %s", e)
         raise HTTPException(
-            status_code=500, detail={"sucesso": False, "mensagem": f"Erro interno: {e}"}
+            status_code=500, detail={"sucesso": False, "mensagem": "Erro interno no serviço"}
         )
 
 @app.get("/")
 async def root():
     """Evita 404 no path raiz (testes rápidos no painel / N8N)."""
-    return {"ok": True, "service": "taximachine-automacao", "health": "/health", "docs": "/docs"}
+    return {"ok": True, "service": "taximachine-automacao", "health": "/health"}
 
 
 @app.get("/health")

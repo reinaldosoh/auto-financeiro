@@ -10,3 +10,10 @@ __pycache__/
 pagina.html
 output*.log
 cascade_input*.txt
+
+# Security/runtime secrets, including encrypted stores and migration leftovers
+.venv/
+chaves_totp*
+*.fernet
+*.key
+.secrets/

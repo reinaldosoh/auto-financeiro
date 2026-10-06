@@ -13,6 +13,7 @@ import platform
 import subprocess
 import stat
 import pyotp
+import totp_store
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -31,27 +32,20 @@ log = logging.getLogger(__name__)
 
 URL_LOGIN = "https://cloud.taximachine.com.br/"
 TIMEOUT = 20
-CHAVES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chaves_totp.json")
+CHAVES_FILE = os.environ.get("TOTP_STORE_PATH") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "chaves_totp.json")
 
 # Armazena drivers abertos para evitar garbage collection quando manter_aberto=True
 _drivers_abertos = {}
 
 
 def salvar_chave(email: str, chave_totp: str):
-    """Salva a chave TOTP associada ao email em arquivo JSON."""
-    dados = carregar_chaves()
-    dados[email.lower()] = chave_totp
-    with open(CHAVES_FILE, "w") as f:
-        json.dump(dados, f, indent=2)
-    log.info("Chave TOTP salva para %s", email)
+    """Encrypted atomic store; encryption key supplied by deployment secret."""
+    totp_store.save(CHAVES_FILE, email, chave_totp)
+    log.info("Chave TOTP salva (criptografada)")
 
 
 def carregar_chaves() -> dict:
-    """Carrega todas as chaves TOTP salvas."""
-    if os.path.exists(CHAVES_FILE):
-        with open(CHAVES_FILE, "r") as f:
-            return json.load(f)
-    return {}
+    return totp_store.load(CHAVES_FILE)
 
 
 def obter_chave(email: str) -> str:
@@ -324,7 +318,7 @@ def etapa2_extrair_chave(driver) -> str:
         padrao = re.findall(r'([A-Z0-9]{4}(?:\s+[A-Z0-9]{4}){3,7})', page_text)
         if padrao:
             chave = max(padrao, key=len)
-            log.info("Chave encontrada por regex no texto da página: %s", chave)
+            log.info("Chave TOTP encontrada na página")
 
     # Estratégia 3: Procurar perto do botão copiar-secret
     if not chave:
@@ -335,7 +329,7 @@ def etapa2_extrair_chave(driver) -> str:
             padrao2 = re.findall(r'([A-Z0-9]{4}(?:\s+[A-Z0-9]{4}){3,7})', texto_parent)
             if padrao2:
                 chave = max(padrao2, key=len)
-                log.info("Chave encontrada próxima ao botão #copiar-secret: %s", chave)
+                log.info("Chave TOTP encontrada no assistente")
         except NoSuchElementException:
             pass
 
@@ -349,7 +343,7 @@ def etapa2_extrair_chave(driver) -> str:
                     val = elem.get_attribute(attr)
                     if val and len(val.replace(" ", "")) >= 16:
                         chave = val
-                        log.info("Chave encontrada em atributo %s: %s", attr, chave)
+                        log.info("Chave TOTP encontrada em atributo")
                         break
                 if chave:
                     break
@@ -368,7 +362,7 @@ def etapa2_extrair_chave(driver) -> str:
 
     if chave:
         chave_limpa = chave.replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "").strip()
-        log.info("Chave TOTP extraída: %s (limpa: %s)", chave, chave_limpa)
+        log.info("Chave TOTP extraída")
 
         # Clica em Avançar para ir ao passo 3
         # Existem múltiplos botões com a mesma classe; precisamos achar o visível
@@ -473,7 +467,7 @@ def etapa3_inserir_codigo(driver, chave_totp: str) -> bool:
     # Gera o código AGORA, imediatamente antes de digitar
     totp = pyotp.TOTP(chave_totp)
     codigo = totp.now()
-    log.info("Código TOTP gerado (fresh): %s", codigo)
+    log.info("Código TOTP gerado")
 
     # Insere o código
     campo_codigo.clear()
@@ -622,7 +616,7 @@ def inserir_codigo_login_2fa(driver, chave_totp: str) -> bool:
 
     # Gera o código AGORA, imediatamente antes de digitar
     codigo = gerar_codigo(chave_totp)
-    log.info("Código TOTP gerado (fresh): %s", codigo)
+    log.info("Código TOTP gerado")
 
     campo_codigo.clear()
     campo_codigo.send_keys(codigo)
@@ -3247,7 +3241,7 @@ if __name__ == "__main__":
     print(f"  Resultado: {'✅ Sucesso' if res['sucesso'] else '❌ Falha'}")
     print(f"  Email: {res['email']}")
     if res["chave_totp"]:
-        print(f"  Chave TOTP: {res['chave_totp']}")
+        print("  Chave TOTP registrada (valor omitido)")
     print(f"  Mensagem: {res['mensagem']}")
     print("=" * 50)
 

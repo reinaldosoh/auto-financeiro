@@ -14,3 +14,10 @@ chaves_totp.json
 dados_financeiro.json
 dados_financeiro_completo.json
 dados_historico_corridas_taxas.json
+
+# Security/runtime secrets, including encrypted stores and migration leftovers
+.venv/
+chaves_totp*
+*.fernet
+*.key
+.secrets/

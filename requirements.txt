@@ -6,3 +6,7 @@ fastapi>=0.104.0
 uvicorn>=0.24.0
 pydantic>=2.5.0
 requests>=2.31.0
+
+cryptography==50.0.2
+urllib3==2.6.3
+certifi==2026.7.22
