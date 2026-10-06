@@ -8,8 +8,14 @@ services:
     container_name: auto-financeiro-api
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - PORT=8000
       - DOCKER=true
+      - TOTP_STORE_PATH=/data/totp/chaves_totp.json
+    volumes:
+      - totp-store:/data/totp
     shm_size: "2gb"
+
+volumes:
+  totp-store:
