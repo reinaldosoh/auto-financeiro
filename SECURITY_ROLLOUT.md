@@ -19,6 +19,19 @@ Correções locais: autenticação X-API-Key em todas as rotas antes do parse do
 5. Revalide HTTP: sem chave/errada ->401, chave correta /health ->200, /codigo e /chaves ->404, /docs e /openapi.json ->404. Healthcheck de proxy precisa enviar X-API-Key; não criar exceção pública para rotas operacionais.
 6. Faça smoke de consumidor com conta sintética e sem envio/apagamento de campanha. Verifique login e um endpoint de leitura. Não disparar jobs globais.
 
+## Status de ativação (2026-10-06)
+
+| Passo | Escopo | Situação |
+|-------|--------|----------|
+| 1–2 | Cofre + `MACHINE_API_KEY` / `AUTOMATION_URL` no Supabase (`lxapogvzccnusjmbthnj`) | Feito — chaves no cofre local (personal store), **não** no Git/chat |
+| 2 | Consumidores backend com `automationFetch` (10 edges) | Publicados — ver `notification_ubiz` `b710490` |
+| 2 | `MACHINE_API_KEY` no Easypanel / VPS | **Feito** (2026-10-06) — env salvo + redeploy; bate com Supabase |
+| 3–4 | Pause API, backup, `totp_store.py migrate`, redeploy `auto-financeiro` `ab3e7af` | **Feito** (2026-10-06) — legado VPS/backups Easypanel **não encontrado**; store **reconstruído** (3 contas) a partir de `empresas.machine_painel_totp` no Supabase, backup no cofre local, volume `/data/totp/chaves_totp.json` **Fernet + mode 600**, `entries=3` |
+| 5 | Revalidação HTTP na URL publicada (401/404/200) | **Feito** |
+| 6 | Smoke leitura sintética | **Feito** (2026-10-06) — `www.radarmobility.app`, **VAMBORA**: Integrações → validar OK; `/dashboard` com indicadores D-1 e tempo real (leitura), sem notificações/campanhas/jobs |
+
+Chave Fernet para migração TOTP: gerada uma vez no cofre local; **não regenerar** no redeploy. Apagar secret de teste `TEST_FORMAT` no painel Supabase se ainda existir.
+
 ## Testes executados
 
 Instale o ambiente de teste com `python -m pip install -r requirements-dev.txt`.
@@ -31,7 +44,7 @@ Cliente Deno automationFetch: teste com fetch mockado comprova header, destino c
 
 ## Limites e itens fora desta mudança
 
-Código preparado localmente; não houve deploy, novo secret remoto, restart do processo original na porta 8000, leitura/migração do store real nem rotação de TOTP de clientes. O servidor original continua sendo a versão anterior até o rollout. Não interpretar testes da versão nova como proteção já ativada.
+**Proteção X-API-Key na VPS está ativa** (passo 5 OK). Store TOTP no volume **migrado** (Fernet, `chmod 600`, 3 e-mails). Healthcheck do proxy Easypanel sem header customizado na tela Advanced — monitorar externamente se necessário.
 
 A API key autentica consumidores backend de confiança, não usuários/tenants. As edges precisam continuar validando JWT/empresa/cidade; não oferecer esta chave ao navegador. Respostas de login preservam o contrato backend TOTP existente: não encaminhar o segredo ao frontend.
 
