@@ -1,12 +1,14 @@
 """Rate limits, Chrome concurrency pool, and heavy HTTP job slots."""
 from __future__ import annotations
 
+import ipaddress
 import os
 import threading
 import time
 from collections import defaultdict, deque
 from contextlib import contextmanager
-from typing import Callable, Deque, Dict, Optional, TypeVar
+from functools import lru_cache
+from typing import Callable, Deque, Dict, List, Optional, Sequence, TypeVar
 
 from fastapi import HTTPException
 
@@ -71,11 +73,103 @@ heavy_limiter = SlidingWindowLimiter(
 )
 
 
-def client_ip_from_headers(headers: dict) -> str:
-    forwarded = headers.get("x-forwarded-for") or headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip() or "unknown"
-    return headers.get("x-real-ip") or headers.get("X-Real-Ip") or "unknown"
+def _normalize_ip_candidate(raw: str) -> Optional[str]:
+    candidate = (raw or "").strip().strip('"').strip("'")
+    if not candidate:
+        return None
+    if candidate.startswith("[") and "]" in candidate:
+        host = candidate[1 : candidate.index("]")]
+        try:
+            return str(ipaddress.ip_address(host))
+        except ValueError:
+            return None
+    if candidate.count(":") == 1 and "." in candidate:
+        host, port = candidate.rsplit(":", 1)
+        if port.isdigit():
+            candidate = host
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return None
+
+
+def parse_forwarded_for_chain(value: str) -> List[str]:
+    """Parse X-Forwarded-For left-to-right; drop invalid hops."""
+    if not value:
+        return []
+    chain: List[str] = []
+    for part in value.split(","):
+        normalized = _normalize_ip_candidate(part)
+        if normalized:
+            chain.append(normalized)
+    return chain
+
+
+@lru_cache(maxsize=1)
+def _trusted_proxy_networks() -> tuple:
+    raw = (
+        os.environ.get("MACHINE_TRUSTED_PROXY_CIDRS", "").strip()
+        or os.environ.get("MACHINE_TRUSTED_PROXY_IPS", "").strip()
+    )
+    networks = []
+    hosts: List[str] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            if "/" in item:
+                networks.append(ipaddress.ip_network(item, strict=False))
+            else:
+                hosts.append(str(ipaddress.ip_address(item)))
+        except ValueError:
+            continue
+    return tuple(networks), tuple(hosts)
+
+
+def _peer_is_trusted_proxy(peer_host: str) -> bool:
+    normalized = _normalize_ip_candidate(peer_host)
+    if not normalized:
+        return False
+    try:
+        addr = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    networks, hosts = _trusted_proxy_networks()
+    if normalized in hosts:
+        return True
+    return any(addr in net for net in networks)
+
+
+def client_ip_from_request(peer_host: Optional[str], headers: dict) -> str:
+    """
+    Rate-limit key: TCP peer by default.
+    X-Forwarded-For / X-Real-Ip only when the immediate peer is a trusted proxy.
+    """
+    peer = _normalize_ip_candidate(peer_host or "") or "unknown"
+    if peer == "unknown" or not _peer_is_trusted_proxy(peer):
+        return peer
+
+    forwarded = headers.get("x-forwarded-for") or headers.get("X-Forwarded-For") or ""
+    chain = parse_forwarded_for_chain(forwarded)
+    if chain:
+        return chain[0]
+
+    real_ip = headers.get("x-real-ip") or headers.get("X-Real-Ip") or ""
+    chain_real = parse_forwarded_for_chain(real_ip)
+    if chain_real:
+        return chain_real[0]
+
+    return peer
+
+
+def client_ip_from_headers(headers: dict, *, peer_host: Optional[str] = None) -> str:
+    """Backward-compatible wrapper; prefer client_ip_from_request with Request.client."""
+    return client_ip_from_request(peer_host, headers)
+
+
+def reset_trusted_proxies_cache_for_tests() -> None:
+    _trusted_proxy_networks.cache_clear()
 
 
 def _rate_limit_429(detail: str) -> HTTPException:
@@ -183,3 +277,4 @@ def reset_all_limits_for_tests() -> None:
     heavy_limiter.reset()
     chrome_pool.reset_for_tests()
     heavy_http_pool.reset_for_tests()
+    reset_trusted_proxies_cache_for_tests()

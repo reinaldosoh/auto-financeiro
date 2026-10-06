@@ -177,6 +177,54 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(r.status_code, 401)
             gs.assert_called_once_with(token)
 
+    def test_session_token_query_rejected(self):
+        token = "01234567-89ab-cdef-0123-456789abcdef"
+        r = self.client.get(
+            f"/notificacao/bandeiras?session_token={token}",
+            headers=self.headers,
+        )
+        self.assertEqual(r.status_code, 401)
+        self.assertIn("query", r.json()["detail"]["mensagem"].lower())
+
+    def test_session_token_body_rejected(self):
+        token = "01234567-89ab-cdef-0123-456789abcdef"
+        r = self.client.post(
+            "/notificacao/filtrar",
+            headers=self.headers,
+            json={
+                "session_token": token,
+                "mensagem": "x",
+                "destinatario": "C",
+            },
+        )
+        self.assertEqual(r.status_code, 401)
+        self.assertIn("body", r.json()["detail"]["mensagem"].lower())
+
+    def test_x_forwarded_for_ignored_without_trusted_proxy(self):
+        machine_limits.reset_trusted_proxies_cache_for_tests()
+        with patch.dict(os.environ, {"MACHINE_TRUSTED_PROXY_CIDRS": ""}, clear=False):
+            machine_limits.reset_trusted_proxies_cache_for_tests()
+            ip_lim = machine_limits.SlidingWindowLimiter(1, 600.0)
+            with patch.object(machine_limits, "login_ip_limiter", ip_lim):
+                machine_limits.check_login_limits("a@b.invalid", "203.0.113.10")
+                with self.assertRaises(Exception) as ctx:
+                    machine_limits.check_login_limits("b@b.invalid", "203.0.113.10")
+                self.assertEqual(getattr(ctx.exception, "status_code", None), 429)
+            spoofed = machine_limits.client_ip_from_request(
+                "203.0.113.10",
+                {"X-Forwarded-For": "1.2.3.4, 5.6.7.8"},
+            )
+            self.assertEqual(spoofed, "203.0.113.10")
+
+    def test_x_forwarded_for_used_from_trusted_proxy(self):
+        with patch.dict(os.environ, {"MACHINE_TRUSTED_PROXY_IPS": "10.0.0.1"}, clear=False):
+            machine_limits.reset_trusted_proxies_cache_for_tests()
+            client = machine_limits.client_ip_from_request(
+                "10.0.0.1",
+                {"X-Forwarded-For": "198.51.100.44, 10.0.0.1"},
+            )
+            self.assertEqual(client, "198.51.100.44")
+
     def test_login_rate_limit_returns_429(self):
         email = "rate-limit@example.invalid"
         email_lim = machine_limits.SlidingWindowLimiter(2, 600.0)

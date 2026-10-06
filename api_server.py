@@ -81,14 +81,13 @@ from machine_limits import (
     SESSION_HEADER,
     check_heavy_limit,
     check_login_limits,
-    client_ip_from_headers,
+    client_ip_from_request,
     run_with_chrome,
     run_with_heavy_http,
 )
 from session_token_support import (
     SessionTokenDep,
-    merge_session_token,
-    require_session_token_value,
+    resolve_session_from_header,
     token_log_prefix,
 )
 from safe_image import prepare_image, ImageRejected
@@ -202,6 +201,11 @@ async def _executor_heavy(fn, *args, **kwargs):
 
 
 SessionHeader = Annotated[str, Header(alias=SESSION_HEADER)]
+
+
+def _client_ip(request: Request) -> str:
+    peer = request.client.host if request.client else None
+    return client_ip_from_request(peer, dict(request.headers))
 
 
 class CredenciaisInput(BaseModel):
@@ -532,7 +536,7 @@ async def autenticar(creds: CredenciaisInput, request: Request):
     Recebe email e senha, executa a automação de login + 2FA no TaxiMachine.
     Retorna a chave TOTP e o status da operação.
     """
-    check_login_limits(creds.email, client_ip_from_headers(dict(request.headers)))
+    check_login_limits(creds.email, _client_ip(request))
     log.info("Requisição recebida para: %s", creds.email)
 
     from functools import partial
@@ -556,7 +560,7 @@ async def autenticar_lote(lista: list[CredenciaisInput], request: Request):
 
     for creds in lista:
         log.info("Processando: %s", creds.email)
-        check_login_limits(creds.email, client_ip_from_headers(dict(request.headers)))
+        check_login_limits(creds.email, _client_ip(request))
         resultado = await _executor_chrome(
             executar_automacao,
             creds.email,
@@ -574,7 +578,7 @@ async def login(creds: CredenciaisInput, request: Request):
     Login em conta com 2FA já configurado.
     Usa a chave TOTP salva para gerar o código automaticamente.
     """
-    check_login_limits(creds.email, client_ip_from_headers(dict(request.headers)))
+    check_login_limits(creds.email, _client_ip(request))
     log.info("Login requisitado para: %s", creds.email)
 
     from functools import partial
@@ -625,7 +629,7 @@ async def recursos_premium(creds: CredenciaisInput, request: Request):
     Recebe email e senha, executa a automação de login (com fallback para login_2fa/setup)
     e navega para a página de Recursos Premium (Configurações > Gerais).
     """
-    check_login_limits(creds.email, client_ip_from_headers(dict(request.headers)))
+    check_login_limits(creds.email, _client_ip(request))
     log.info("Requisição (recursos_premium) recebida para: %s", creds.email)
 
     from functools import partial
@@ -977,8 +981,8 @@ def _resolve_chave_acao(session_token: str, chave_secreta: Optional[str]) -> Opt
     return None
 
 
-def _require_session(token: str, *, header_token: str = ""):
-    effective = require_session_token_value(merge_session_token(token, header_token))
+def _require_session(*, header_token: str = "", body_token: Optional[str] = None):
+    effective = resolve_session_from_header(header_token, body_token=body_token)
     http = get_session(effective)
     if not http:
         raise HTTPException(
@@ -1003,7 +1007,7 @@ async def notificacao_login_http(inp: NotificacaoLoginInput, request: Request):
     Retorna `session_token` para usar em GET/POST /notificacao/categorias.
     Sessão válida por ~30 minutos no servidor.
     """
-    check_login_limits(inp.email, client_ip_from_headers(dict(request.headers)))
+    check_login_limits(inp.email, _client_ip(request))
     log.info("POST /notificacao/login email=%s", inp.email)
     loop = asyncio.get_event_loop()
     try:
@@ -1038,7 +1042,7 @@ async def notificacao_categorias_get(
         token_log_prefix(session_token),
         bandeira_id,
     )
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
 
     loop = asyncio.get_event_loop()
     try:
@@ -1068,10 +1072,11 @@ async def notificacao_categorias_post(
     loop = asyncio.get_event_loop()
     try:
         if inp.session_token or x_session_token:
-            token = require_session_token_value(
-                merge_session_token(inp.session_token, x_session_token)
+            token = resolve_session_from_header(
+                x_session_token,
+                body_token=inp.session_token,
             )
-            http = _require_session(token)
+            http = _require_session(header_token=token)
             result = await loop.run_in_executor(
                 executor,
                 lambda: obter_categorias(http, bandeira_id=inp.bandeira_id),
@@ -1102,7 +1107,7 @@ async def notificacao_categorias_post(
 
 @app.get("/notificacao/bandeiras")
 async def notificacao_bandeiras_get(session_token: SessionTokenDep):
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
     loop = asyncio.get_event_loop()
     try:
         bandeiras = await loop.run_in_executor(executor, lambda: obter_bandeiras(http))
@@ -1113,7 +1118,7 @@ async def notificacao_bandeiras_get(session_token: SessionTokenDep):
 
 @app.post("/notificacao/filtrar")
 async def notificacao_filtrar(inp: NotificacaoCampanhaInput, x_session_token: SessionHeader = ""):
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1126,7 +1131,7 @@ async def notificacao_filtrar(inp: NotificacaoCampanhaInput, x_session_token: Se
 
 @app.get("/notificacao/status/{report_id}")
 async def notificacao_status(report_id: int, session_token: SessionTokenDep):
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1139,7 +1144,7 @@ async def notificacao_status(report_id: int, session_token: SessionTokenDep):
 
 @app.get("/notificacao/total/{report_id}")
 async def notificacao_total(report_id: int, session_token: SessionTokenDep):
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1152,7 +1157,7 @@ async def notificacao_total(report_id: int, session_token: SessionTokenDep):
 
 @app.post("/notificacao/aguardar")
 async def notificacao_aguardar(inp: NotificacaoAguardarInput, x_session_token: SessionHeader = ""):
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1167,8 +1172,9 @@ async def notificacao_aguardar(inp: NotificacaoAguardarInput, x_session_token: S
 
 @app.post("/notificacao/enviar")
 async def notificacao_enviar(inp: NotificacaoCampanhaInput, x_session_token: SessionHeader = ""):
-    http = _require_session(inp.session_token, header_token=x_session_token)
-    chave = _resolve_chave_acao(inp.session_token, inp.chave_secreta)
+    token = resolve_session_from_header(x_session_token, body_token=inp.session_token)
+    http = _require_session(header_token=token)
+    chave = _resolve_chave_acao(token, inp.chave_secreta)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1188,8 +1194,9 @@ async def notificacao_enviar(inp: NotificacaoCampanhaInput, x_session_token: Ses
 
 @app.post("/notificacao/agendar")
 async def notificacao_agendar(inp: NotificacaoAgendarInput, x_session_token: SessionHeader = ""):
-    http = _require_session(inp.session_token, header_token=x_session_token)
-    chave = _resolve_chave_acao(inp.session_token, inp.chave_secreta)
+    token = resolve_session_from_header(x_session_token, body_token=inp.session_token)
+    http = _require_session(header_token=token)
+    chave = _resolve_chave_acao(token, inp.chave_secreta)
     form = _campanha_form(inp)
     form.data_envio = inp.data_envio
     form.hora_envio = inp.hora_envio
@@ -1212,7 +1219,7 @@ async def notificacao_agendar(inp: NotificacaoAgendarInput, x_session_token: Ses
 
 @app.post("/notificacao/autenticar-acao")
 async def notificacao_autenticar_acao(inp: NotificacaoAutenticarAcaoInput, x_session_token: SessionHeader = ""):
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1230,7 +1237,7 @@ async def notificacao_autenticar_acao(inp: NotificacaoAutenticarAcaoInput, x_ses
 
 @app.get("/notificacao/listar")
 async def notificacao_listar(session_token: SessionTokenDep, pagina: int = 1):
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1247,7 +1254,7 @@ async def notificacao_cancelar(
     session_token: SessionTokenDep,
     destinatario: str = "D",
 ):
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1259,9 +1266,12 @@ async def notificacao_cancelar(
 
 
 async def _sessao_relatorio(inp: "RelatorioClientesInput | RelatorioCorridasInput", x_session_token: SessionHeader = "") -> tuple[str, Any]:
-    merged = merge_session_token(inp.session_token, x_session_token)
-    if merged:
-        return merged, _require_session(merged)
+    if inp.session_token or x_session_token:
+        token = resolve_session_from_header(
+            x_session_token,
+            body_token=inp.session_token,
+        )
+        return token, _require_session(header_token=token)
     if not inp.email or not inp.senha:
         raise HTTPException(
             status_code=400,
@@ -1279,7 +1289,7 @@ async def _sessao_relatorio(inp: "RelatorioClientesInput | RelatorioCorridasInpu
         ),
     )
     token = login["session_token"]
-    return token, _require_session(token)
+    return token, _require_session(header_token=token)
 
 
 async def _aguardar_relatorio_async(http, tipo: str, report_id: int, timeout_seg: int) -> Dict[str, Any]:
@@ -1334,7 +1344,7 @@ async def relatorio_clientes_solicitar(inp: RelatorioClientesInput, x_session_to
 
 @app.get("/relatorio/clientes/status/{report_id}")
 async def relatorio_clientes_status(report_id: int, session_token: SessionTokenDep):
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
     loop = asyncio.get_event_loop()
     try:
         st = await loop.run_in_executor(
@@ -1503,7 +1513,7 @@ async def relatorio_corridas_status(job_id: str, session_token: SessionTokenDep)
 
 @app.get("/passageiro/{id_machine}")
 async def passageiro_ficha_get(id_machine: str, session_token: SessionTokenDep):
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
     loop = asyncio.get_event_loop()
     try:
         ficha = await loop.run_in_executor(
@@ -1516,7 +1526,7 @@ async def passageiro_ficha_get(id_machine: str, session_token: SessionTokenDep):
 
 @app.post("/passageiro/ficha")
 async def passageiro_ficha_post(inp: PassageiroFichaInput, x_session_token: SessionHeader = ""):
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         ficha = await loop.run_in_executor(
@@ -1529,7 +1539,7 @@ async def passageiro_ficha_post(inp: PassageiroFichaInput, x_session_token: Sess
 
 @app.get("/dashboard-v2/bandeiras")
 async def dashboard_v2_bandeiras(session_token: SessionTokenDep):
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
     loop = asyncio.get_event_loop()
     try:
         bandeiras = await loop.run_in_executor(executor, lambda: obter_bandeiras_historico(http))
@@ -1540,7 +1550,7 @@ async def dashboard_v2_bandeiras(session_token: SessionTokenDep):
 
 @app.post("/dashboard-v2/filtro")
 async def dashboard_v2_filtro(inp: DashboardV2FiltroInput, x_session_token: SessionHeader = ""):
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         resultado = await loop.run_in_executor(
@@ -1569,7 +1579,7 @@ async def dashboard_v2_filtro(inp: DashboardV2FiltroInput, x_session_token: Sess
 
 @app.post("/dashboard-v2/corridas")
 async def dashboard_v2_corridas(inp: DashboardV2ListarInput, x_session_token: SessionHeader = ""):
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         fn = (
@@ -1595,7 +1605,7 @@ async def dashboard_v2_corridas(inp: DashboardV2ListarInput, x_session_token: Se
 
 @app.get("/dashboard-v2/corridas/{os_id}")
 async def dashboard_v2_detalhe(os_id: str, session_token: SessionTokenDep):
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(executor, lambda: obter_detalhe_corrida(http, os_id))
@@ -1605,7 +1615,7 @@ async def dashboard_v2_detalhe(os_id: str, session_token: SessionTokenDep):
 
 @app.get("/dashboard-v2/corridas/{os_id}/posicao")
 async def dashboard_v2_posicao(os_id: str, session_token: SessionTokenDep):
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
     loop = asyncio.get_event_loop()
     try:
         pos = await loop.run_in_executor(executor, lambda: obter_posicao_corrida(http, os_id))
@@ -1625,7 +1635,7 @@ async def dashboard_v2_posicao(os_id: str, session_token: SessionTokenDep):
 
 @app.post("/dashboard-v2/indicadores")
 async def dashboard_v2_indicadores(inp: DashboardV2IndicadoresInput, x_session_token: SessionHeader = ""):
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1642,7 +1652,7 @@ async def dashboard_v2_indicadores(inp: DashboardV2IndicadoresInput, x_session_t
 
 @app.post("/dashboard-v2/motoristas-rastreio")
 async def dashboard_v2_motoristas_rastreio(inp: DashboardV2MotoristasInput, x_session_token: SessionHeader = ""):
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1665,7 +1675,7 @@ async def dashboard_v2_monitor_alertas(inp: MonitorAlertasEmpresaInput, x_sessio
     Varre cidades de uma empresa e retorna apenas corridas com alerta operacional.
     Usado pelo cron monitor-corridas-alertas (Edge Function Supabase).
     """
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1698,7 +1708,7 @@ async def dinamica_listar_areas(
 
     Use `incluir_vertices=true` apenas se precisar dos polígonos (resposta grande).
     """
-    http = _require_session(session_token)
+    http = _require_session(header_token=session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1717,7 +1727,7 @@ async def dinamica_listar_areas(
 @app.post("/dinamica/areas/ativar")
 async def dinamica_ativar_area(inp: DinamicaAtivarAreaInput, x_session_token: SessionHeader = ""):
     """Ativa ou desativa uma área de dinâmica manual."""
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1741,7 +1751,7 @@ async def dinamica_editar_fator(inp: DinamicaEditarFatorInput, x_session_token: 
 
     O painel gera um **novo fator_id** a cada edição — guarde `fator_id_novo` do retorno.
     """
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1763,7 +1773,7 @@ async def dinamica_editar_fator(inp: DinamicaEditarFatorInput, x_session_token: 
 @app.post("/dinamica/areas/editar")
 async def dinamica_editar_area(inp: DinamicaEditarAreaInput, x_session_token: SessionHeader = ""):
     """Edita nome, fator e/ou polígono de uma área existente."""
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     vertices = [v.model_dump() for v in inp.vertices]
     loop = asyncio.get_event_loop()
     try:
@@ -1791,7 +1801,7 @@ async def dinamica_editar_area(inp: DinamicaEditarAreaInput, x_session_token: Se
 @app.post("/dinamica/areas/criar")
 async def dinamica_criar_area(inp: DinamicaCriarAreaInput, x_session_token: SessionHeader = ""):
     """Cria nova área de dinâmica manual informando polígono (mín. 3 vértices)."""
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     vertices = [v.model_dump() for v in inp.vertices]
     loop = asyncio.get_event_loop()
     try:
@@ -1816,7 +1826,7 @@ async def dinamica_criar_area(inp: DinamicaCriarAreaInput, x_session_token: Sess
 @app.post("/dinamica/areas/apagar")
 async def dinamica_apagar_area(inp: DinamicaApagarAreaInput, x_session_token: SessionHeader = ""):
     """Remove uma área de dinâmica manual."""
-    http = _require_session(inp.session_token, header_token=x_session_token)
+    http = _require_session(header_token=x_session_token, body_token=inp.session_token)
     loop = asyncio.get_event_loop()
     try:
         return await loop.run_in_executor(
@@ -1855,7 +1865,7 @@ async def financeiro_completo_02(inp: FinanceiroCompleto02Input, request: Reques
     )
 
     check_heavy_limit("financeiro")
-    check_login_limits(inp.email, client_ip_from_headers(dict(request.headers)))
+    check_login_limits(inp.email, _client_ip(request))
 
     if inp.manter_aberto:
 
@@ -1921,7 +1931,7 @@ async def financeiro_historico_corridas(inp: FinanceiroHistoricoCorridasInput, r
     )
 
     check_heavy_limit("financeiro")
-    check_login_limits(inp.email, client_ip_from_headers(dict(request.headers)))
+    check_login_limits(inp.email, _client_ip(request))
 
     if inp.manter_aberto:
 

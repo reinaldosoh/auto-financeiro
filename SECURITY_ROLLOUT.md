@@ -72,12 +72,41 @@ A API key autentica consumidores backend de confiança, não usuários/tenants. 
 
 ### Testes adicionais
 
-- `tests_security`: header de sessão, rate limit, pool Chrome `429` (21 testes).
+- `tests_security`: header de sessão, rejeição query/body, rate limit IP (XFF só com proxy confiável), pool Chrome `429`.
 - `automation_api_test.ts`: header de sessão não vaza na query.
+- `scripts/audit-radar-session-header.sh`: lista consumidores + teste Deno.
 - `scripts/docker_https_smoke.sh`: download HTTPS dentro do container.
+- `scripts/docker_runtime_smoke.sh`: non-root, TOTP volume, TLS ok/rejeitado, pool, uvicorn health.
 
-Rate limit/lockout fino por tenant, remoção definitiva de `session_token` em query e rotação TOTP **ficam fora** desta entrega (compat até consumidores 100% no header).
+Rate limit/lockout fino por tenant e rotação TOTP **ficam fora** desta entrega.
 
-O Python local usa LibreSSL e urllib3 emite aviso de runtime não suportado; testes de TLS são unitários/mocados. Validar o handshake real no runtime OpenSSL da imagem antes de afirmar integração externa aprovada.
+---
 
-Typecheck ampliado dos consumidores: 26 erros existentes (mesmos códigos/mensagens antes e depois da troca de header); não atribuir PASS global às edges. Helper novo testado isoladamente. Logs edge-check.log e edge-check-baseline.log. Nenhum erro adicional introduzido na comparação.
+## Fase 5 — header-only, IP real, smoke Docker (2026-10-06)
+
+### API Machine
+
+| Mudança | Detalhe |
+|---------|---------|
+| `session_token` | **Somente** header `X-Session-Token`; query/body → `401` explícito |
+| Rate limit IP | Chave = IP da conexão TCP; `X-Forwarded-For` / `X-Real-Ip` só se peer ∈ `MACHINE_TRUSTED_PROXY_CIDRS` ou `MACHINE_TRUSTED_PROXY_IPS` (lista/CIDR) — cliente = primeiro IP válido da cadeia |
+| Docker | `scripts/docker_runtime_smoke.sh` comprova runtime |
+
+### Consumidores Radar (confirmado)
+
+Edges usam `_shared/automation_api.ts`: `chamar()` / `chamarMachine()` tiram `session_token` de query/body interno e enviam **`X-Session-Token`**. Audit: `./scripts/audit-radar-session-header.sh`.
+
+| Edge | Header |
+|------|--------|
+| `machine-notificacao`, `machine-dashboard-v2`, `mcp-notificacao-machine` | sim |
+| `rc-enriquecer-ficha`, `rc-worker-buscar-machine` | sim |
+| Dinâmica / banners / validar credencial | login ou rotas sem sessão — `automationFetch` |
+
+### Ordem de rollout (manual)
+
+1. **Edges Supabase** já em produção com header (`1503140` + deploy versões 55/66/33/9/6).
+2. **API VPS** — publicar commit fase 5; configurar `MACHINE_TRUSTED_PROXY_*` com rede do proxy Easypanel se rate limit por IP real do cliente for necessário atrás do proxy.
+3. **Smoke** — `python -m unittest tests_security -v`; `./scripts/docker_runtime_smoke.sh`; Integrações + dashboard leitura.
+4. **Monitorar** — logs `401` com mensagem “via query/body” (cliente legado residual).
+
+Sem deploy automático nem rotação TOTP nesta etapa.
