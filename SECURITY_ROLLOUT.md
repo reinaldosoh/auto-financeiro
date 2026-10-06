@@ -48,7 +48,35 @@ Cliente Deno automationFetch: teste com fetch mockado comprova header, destino c
 
 A API key autentica consumidores backend de confiança, não usuários/tenants. As edges precisam continuar validando JWT/empresa/cidade; não oferecer esta chave ao navegador. Respostas de login preservam o contrato backend TOTP existente: não encaminhar o segredo ao frontend.
 
-Rate limit/lockout por conta, concorrência de jobs, session_token em query, revisão de todos os erros internos, container não-root e bind/proxy do ambiente permanecem fora das correções 1–3. O corpo de erro 500 dos handlers de anúncio foi reduzido; isso não significa que todos os str(e) do projeto foram eliminados. Logs antigos podem conter segredos: tratar sua exposição e rotacionar TOTP no painel/cofre com os titulares, sem simular que apagá-los remove cópias históricas.
+---
+
+## Fase 4 — rate limit, concorrência, session header, non-root (2026-10-06)
+
+### O que entrou
+
+| Área | Comportamento |
+|------|----------------|
+| Rate limit | Tentativas de login por e-mail/IP (`429` + `Retry-After`); teto de ops pesadas (`relatorio`, `financeiro`) |
+| Concorrência | Pool global Chrome (`MACHINE_CHROME_*`) e fila HTTP pesada (`MACHINE_HEAVY_*`); fila cheia/timeout → `429` |
+| `session_token` | Preferir header `X-Session-Token`; query/body ainda aceitos (compat rollout); logs só prefixo 8 chars |
+| Container | Usuário `machine`, volume `/data/totp` preservado, Chrome profile em `/home/machine`, entrypoint `gosu` |
+| Rede | Compose local `127.0.0.1:8000:8000`; **Easypanel** mantém `uvicorn --host 0.0.0.0` (proxy interno) |
+
+### Ordem de rollout (sem deploy automático nesta etapa)
+
+1. **API Machine** (`auto-financeiro`) — publicar imagem/commit com limites + header + Dockerfile/entrypoint. Variáveis opcionais: `MACHINE_CHROME_MAX`, `MACHINE_CHROME_QUEUE_MAX`, `MACHINE_LOGIN_RATE_MAX`, `MACHINE_HEAVY_CONCURRENT_MAX`.
+2. **Smoke API** — `python -m unittest tests_security -v`; `./scripts/docker_https_smoke.sh` (HTTPS real na imagem). Validar `429` forçando fila Chrome (`MACHINE_CHROME_MAX=1`, `MACHINE_CHROME_QUEUE_MAX=0`).
+3. **Consumidores Supabase** (`notification_ubiz`) — edges com `automationFetch` + `X-Session-Token` via `_shared/automation_api.ts`. **Deploy edges** antes de remover query na API.
+4. **Redeploy VPS** — Easypanel: volume `totp-store` intacto; primeiro boot como root ajusta `chown` e executa como `machine`. Não rotacionar TOTP nesta janela.
+5. **Pós-validação** — Integrações → validar credencial; dashboard leitura; RC worker status export (header). Só então planejar remoção da query `session_token` na API.
+
+### Testes adicionais
+
+- `tests_security`: header de sessão, rate limit, pool Chrome `429` (21 testes).
+- `automation_api_test.ts`: header de sessão não vaza na query.
+- `scripts/docker_https_smoke.sh`: download HTTPS dentro do container.
+
+Rate limit/lockout fino por tenant, remoção definitiva de `session_token` em query e rotação TOTP **ficam fora** desta entrega (compat até consumidores 100% no header).
 
 O Python local usa LibreSSL e urllib3 emite aviso de runtime não suportado; testes de TLS são unitários/mocados. Validar o handshake real no runtime OpenSSL da imagem antes de afirmar integração externa aprovada.
 
