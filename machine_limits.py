@@ -73,6 +73,10 @@ heavy_limiter = SlidingWindowLimiter(
 )
 
 
+class MalformedForwardedFor(ValueError):
+    """X-Forwarded-For ou X-Real-Ip inválido (hop vazio, IP ilegível, só proxies confiáveis)."""
+
+
 def _normalize_ip_candidate(raw: str) -> Optional[str]:
     candidate = (raw or "").strip().strip('"').strip("'")
     if not candidate:
@@ -94,14 +98,20 @@ def _normalize_ip_candidate(raw: str) -> Optional[str]:
 
 
 def parse_forwarded_for_chain(value: str) -> List[str]:
-    """Parse X-Forwarded-For left-to-right; drop invalid hops."""
-    if not value:
+    """
+    Parse X-Forwarded-For left-to-right (ordem de append).
+    Rejeita cadeia malformada (hop vazio ou IP inválido).
+    """
+    if not value or not str(value).strip():
         return []
     chain: List[str] = []
-    for part in value.split(","):
+    for part in str(value).split(","):
+        if not part.strip():
+            raise MalformedForwardedFor("hop vazio em X-Forwarded-For")
         normalized = _normalize_ip_candidate(part)
-        if normalized:
-            chain.append(normalized)
+        if not normalized:
+            raise MalformedForwardedFor(f"hop inválido em X-Forwarded-For: {part.strip()!r}")
+        chain.append(normalized)
     return chain
 
 
@@ -127,8 +137,9 @@ def _trusted_proxy_networks() -> tuple:
     return tuple(networks), tuple(hosts)
 
 
-def _peer_is_trusted_proxy(peer_host: str) -> bool:
-    normalized = _normalize_ip_candidate(peer_host)
+def _address_is_explicitly_trusted(ip: str) -> bool:
+    """Somente entradas em MACHINE_TRUSTED_PROXY_* — sem confiar em RFC1918 genérico."""
+    normalized = _normalize_ip_candidate(ip)
     if not normalized:
         return False
     try:
@@ -141,24 +152,55 @@ def _peer_is_trusted_proxy(peer_host: str) -> bool:
     return any(addr in net for net in networks)
 
 
+def _peer_is_trusted_proxy(peer_host: str) -> bool:
+    return _address_is_explicitly_trusted(peer_host)
+
+
+def client_ip_from_forwarded_chain(chain: Sequence[str]) -> str:
+    """
+    Percorre a cadeia da direita para a esquerda, descartando hops explicitamente
+    confiáveis; o primeiro hop não confiável é o cliente.
+    """
+    if not chain:
+        raise MalformedForwardedFor("cadeia vazia")
+    for hop in reversed(chain):
+        if not _address_is_explicitly_trusted(hop):
+            return hop
+    raise MalformedForwardedFor("cadeia só contém proxies confiáveis")
+
+
+def _client_ip_from_forwarded_header(header_value: str, *, peer: str) -> str:
+    if not header_value or not str(header_value).strip():
+        return peer
+    chain = parse_forwarded_for_chain(header_value)
+    if not chain:
+        raise MalformedForwardedFor("header sem IPs válidos")
+    return client_ip_from_forwarded_chain(chain)
+
+
 def client_ip_from_request(peer_host: Optional[str], headers: dict) -> str:
     """
-    Rate-limit key: TCP peer by default.
-    X-Forwarded-For / X-Real-Ip only when the immediate peer is a trusted proxy.
+    Rate-limit key: IP da conexão TCP por padrão.
+    Com peer proxy confiável, resolve X-Forwarded-For (direita→esquerda, strip confiáveis)
+    ou X-Real-Ip; cadeia malformada → usa o peer (não aceita spoof).
     """
     peer = _normalize_ip_candidate(peer_host or "") or "unknown"
     if peer == "unknown" or not _peer_is_trusted_proxy(peer):
         return peer
 
     forwarded = headers.get("x-forwarded-for") or headers.get("X-Forwarded-For") or ""
-    chain = parse_forwarded_for_chain(forwarded)
-    if chain:
-        return chain[0]
+    if str(forwarded).strip():
+        try:
+            return _client_ip_from_forwarded_header(forwarded, peer=peer)
+        except MalformedForwardedFor:
+            return peer
 
     real_ip = headers.get("x-real-ip") or headers.get("X-Real-Ip") or ""
-    chain_real = parse_forwarded_for_chain(real_ip)
-    if chain_real:
-        return chain_real[0]
+    if str(real_ip).strip():
+        try:
+            return _client_ip_from_forwarded_header(real_ip, peer=peer)
+        except MalformedForwardedFor:
+            return peer
 
     return peer
 

@@ -225,6 +225,71 @@ class SecurityTests(unittest.TestCase):
             )
             self.assertEqual(client, "198.51.100.44")
 
+    def test_xff_strips_trusted_hops_right_to_left(self):
+        with patch.dict(
+            os.environ,
+            {"MACHINE_TRUSTED_PROXY_IPS": "10.0.0.1,10.0.0.2"},
+            clear=False,
+        ):
+            machine_limits.reset_trusted_proxies_cache_for_tests()
+            client = machine_limits.client_ip_from_request(
+                "10.0.0.2",
+                {"X-Forwarded-For": "198.51.100.44, 10.0.0.1, 10.0.0.2"},
+            )
+            self.assertEqual(client, "198.51.100.44")
+
+    def test_xff_proxy_appends_real_client_ignores_fake_left(self):
+        """Cliente manda IP falso; proxy confiável acrescenta o IP real à direita."""
+        with patch.dict(os.environ, {"MACHINE_TRUSTED_PROXY_IPS": "10.0.0.1"}, clear=False):
+            machine_limits.reset_trusted_proxies_cache_for_tests()
+            client = machine_limits.client_ip_from_request(
+                "10.0.0.1",
+                {"X-Forwarded-For": "1.2.3.4, 203.0.113.50"},
+            )
+            self.assertEqual(client, "203.0.113.50")
+            ip_lim = machine_limits.SlidingWindowLimiter(1, 600.0)
+            with patch.object(machine_limits, "login_ip_limiter", ip_lim):
+                machine_limits.check_login_limits("a@b.invalid", client)
+                with self.assertRaises(Exception) as ctx:
+                    machine_limits.check_login_limits(
+                        "c@b.invalid",
+                        machine_limits.client_ip_from_request(
+                            "10.0.0.1",
+                            {"X-Forwarded-For": "9.9.9.9, 203.0.113.50"},
+                        ),
+                    )
+                self.assertEqual(getattr(ctx.exception, "status_code", None), 429)
+
+    def test_xff_malformed_chain_falls_back_to_peer(self):
+        with patch.dict(os.environ, {"MACHINE_TRUSTED_PROXY_IPS": "10.0.0.1"}, clear=False):
+            machine_limits.reset_trusted_proxies_cache_for_tests()
+            peer = machine_limits.client_ip_from_request(
+                "10.0.0.1",
+                {"X-Forwarded-For": "not-an-ip, also-bad"},
+            )
+            self.assertEqual(peer, "10.0.0.1")
+            only_trusted = machine_limits.client_ip_from_request(
+                "10.0.0.1",
+                {"X-Forwarded-For": "10.0.0.1"},
+            )
+            self.assertEqual(only_trusted, "10.0.0.1")
+
+    def test_private_peer_not_auto_trusted_for_xff(self):
+        machine_limits.reset_trusted_proxies_cache_for_tests()
+        with patch.dict(os.environ, {"MACHINE_TRUSTED_PROXY_CIDRS": ""}, clear=False):
+            machine_limits.reset_trusted_proxies_cache_for_tests()
+            client = machine_limits.client_ip_from_request(
+                "192.168.1.50",
+                {"X-Forwarded-For": "8.8.8.8"},
+            )
+            self.assertEqual(client, "192.168.1.50")
+
+    def test_parse_forwarded_for_chain_rejects_malformed(self):
+        with self.assertRaises(machine_limits.MalformedForwardedFor):
+            machine_limits.parse_forwarded_for_chain("1.2.3.4, , 5.6.7.8")
+        with self.assertRaises(machine_limits.MalformedForwardedFor):
+            machine_limits.parse_forwarded_for_chain("cliente-invalido")
+
     def test_login_rate_limit_returns_429(self):
         email = "rate-limit@example.invalid"
         email_lim = machine_limits.SlidingWindowLimiter(2, 600.0)

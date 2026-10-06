@@ -89,7 +89,7 @@ Rate limit/lockout fino por tenant e rotação TOTP **ficam fora** desta entrega
 | Mudança | Detalhe |
 |---------|---------|
 | `session_token` | **Somente** header `X-Session-Token`; query/body → `401` explícito |
-| Rate limit IP | Chave = IP da conexão TCP; `X-Forwarded-For` / `X-Real-Ip` só se peer ∈ `MACHINE_TRUSTED_PROXY_CIDRS` ou `MACHINE_TRUSTED_PROXY_IPS` (lista/CIDR) — cliente = primeiro IP válido da cadeia |
+| Rate limit IP | Chave = IP da conexão TCP; com peer em `MACHINE_TRUSTED_PROXY_CIDRS` / `MACHINE_TRUSTED_PROXY_IPS` (explícito, **sem** RFC1918 genérico), lê `X-Forwarded-For` **da direita para a esquerda**, descarta só hops confiáveis, cliente = primeiro hop não confiável; cadeia malformada → peer |
 | Docker | `scripts/docker_runtime_smoke.sh` comprova runtime |
 
 ### Consumidores Radar (confirmado)
@@ -105,8 +105,8 @@ Edges usam `_shared/automation_api.ts`: `chamar()` / `chamarMachine()` tiram `se
 ### Ordem de rollout (manual)
 
 1. **Edges Supabase** já em produção com header (`1503140` + deploy versões 55/66/33/9/6).
-2. **API VPS** — publicar commit fase 5; configurar `MACHINE_TRUSTED_PROXY_*` com rede do proxy Easypanel se rate limit por IP real do cliente for necessário atrás do proxy.
-3. **Smoke** — `python -m unittest tests_security -v`; `./scripts/docker_runtime_smoke.sh`; Integrações + dashboard leitura.
-4. **Monitorar** — logs `401` com mensagem “via query/body” (cliente legado residual).
+2. **API VPS** — publicar commit fase 5; configurar `MACHINE_TRUSTED_PROXY_*` com **IPs/CIDR explícitos** do proxy Easypanel (não confiar em RFC1918 genérico). XFF: direita→esquerda, strip confiáveis, cliente = primeiro hop restante.
+3. **Smoke na VPS** — `./scripts/docker_runtime_smoke.sh` (volume `auto-financeiro-runtime-smoke-totp` isolado; **não** substituir `totp-store` de produção). Só então trocar o container Easypanel mantendo o volume persistente TOTP.
+4. **Validação funcional** — `python -m unittest tests_security -v`; Integrações + dashboard leitura.
 
 Sem deploy automático nem rotação TOTP nesta etapa.
