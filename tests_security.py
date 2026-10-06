@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from cryptography.fernet import Fernet
 import api_server
 import api_security
+import machine_limits
 import safe_image
 import totp_store
 import auto_2fa
@@ -165,5 +166,41 @@ class SecurityTests(unittest.TestCase):
                 result=self.client.post(path,headers=self.headers,json={"email":"qa@example.invalid","senha":"synthetic","imagem_url":"https://internal.example/a","link_anuncio":"https://example.com"})
                 self.assertEqual(result.status_code,400)
                 image.assert_called_once()
+
+    def test_session_token_accepts_header_without_query(self):
+        token = "01234567-89ab-cdef-0123-456789abcdef"
+        with patch.object(api_server, "get_session", return_value=None) as gs:
+            r = self.client.get(
+                "/notificacao/bandeiras",
+                headers={**self.headers, machine_limits.SESSION_HEADER: token},
+            )
+            self.assertEqual(r.status_code, 401)
+            gs.assert_called_once_with(token)
+
+    def test_login_rate_limit_returns_429(self):
+        email = "rate-limit@example.invalid"
+        email_lim = machine_limits.SlidingWindowLimiter(2, 600.0)
+        ip_lim = machine_limits.SlidingWindowLimiter(100, 600.0)
+        with patch.object(machine_limits, "login_email_limiter", email_lim), patch.object(
+            machine_limits, "login_ip_limiter", ip_lim
+        ):
+            machine_limits.check_login_limits(email, "203.0.113.1")
+            machine_limits.check_login_limits(email, "203.0.113.1")
+            with self.assertRaises(Exception) as ctx:
+                machine_limits.check_login_limits(email, "203.0.113.1")
+            self.assertEqual(getattr(ctx.exception, "status_code", None), 429)
+
+    def test_chrome_pool_queue_full_returns_429(self):
+        with patch.dict(
+            os.environ,
+            {"MACHINE_CHROME_MAX": "1", "MACHINE_CHROME_QUEUE_MAX": "0", "MACHINE_CHROME_ACQUIRE_TIMEOUT_SEC": "0.01"},
+        ):
+            machine_limits.reset_all_limits_for_tests()
+            pool = machine_limits._ConcurrencyPool("test", 1, 0, 0.01)
+            with pool.slot():
+                with self.assertRaises(Exception) as ctx:
+                    with pool.slot():
+                        pass
+                self.assertEqual(getattr(ctx.exception, "status_code", None), 429)
 
 if __name__=="__main__":unittest.main()

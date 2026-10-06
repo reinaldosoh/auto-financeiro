@@ -12,6 +12,7 @@ import base64
 import platform
 import subprocess
 import stat
+import uuid
 import pyotp
 import totp_store
 from selenium import webdriver
@@ -131,6 +132,14 @@ def criar_driver(headless: bool = False) -> webdriver.Chrome:
     opts.add_argument("--window-size=1280,900")
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+
+    profile_root = os.environ.get("CHROME_USER_DATA_DIR") or os.path.join(
+        os.path.expanduser("~"), ".chrome-machine"
+    )
+    os.makedirs(profile_root, exist_ok=True)
+    profile_dir = os.path.join(profile_root, f"run-{uuid.uuid4().hex[:12]}")
+    os.makedirs(profile_dir, exist_ok=True)
+    opts.add_argument(f"--user-data-dir={profile_dir}")
 
     chrome_bin = os.environ.get("CHROME_BINARY") or os.environ.get("GOOGLE_CHROME_BIN")
     if chrome_bin and os.path.isfile(chrome_bin):
