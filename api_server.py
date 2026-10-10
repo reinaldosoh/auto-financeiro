@@ -12,7 +12,7 @@ Primeiro acesso (conta com 2FA, usuário só tem email e senha):
     senão a chave se perde a cada redeploy e o passo (1) precisa ser refeito.
 
 Uso local:
-    MACHINE_API_KEY=<server-only-secret> uvicorn api_server:app --host 127.0.0.1 --port 8000
+    MACHINE_API_KEY=<server-only-secret> uvicorn api_server:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 
 Chamada externa (substitua BASE_URL pela URL pública do serviço, ex. Easypanel):
     POST {BASE_URL}/anuncio-passageiro
@@ -56,6 +56,8 @@ Endpoints:
     POST /passageiro/ficha            - Mesmo, body {session_token, id_machine}
     POST /relatorio/clientes/solicitar - Exporta base de clientes (CSV S3); opcional aguardar_seg
     GET  /relatorio/clientes/status/{id} - Polling da exportação de clientes (url quando pronto)
+    POST /relatorio/motoristas/solicitar - Exporta motoristas ativos (/taxista/index); credencial cidade + 2FA
+    GET  /relatorio/motoristas/status/{id} - Polling da exportação de motoristas (url quando pronto)
     POST /relatorio/corridas/solicitar - Exporta corridas dos últimos 90 dias (3 janelas até ontem), job em background
     GET  /relatorio/corridas/status/{job_id} - Polling do job de corridas (1 url por janela)
     POST /dinamica/login              - Login HTTP (mesma sessão cookie do painel)
@@ -406,6 +408,18 @@ class RelatorioClientesInput(BaseModel):
     aguardar_seg: int = 0
     # Login de admin enxerga todas as centrais: restringe a exportação a uma bandeira.
     bandeira_id: Optional[str] = None
+
+
+class RelatorioMotoristasInput(BaseModel):
+    """Use `session_token` ou `email` + `senha` (login automático). Login da cidade (bandeira)."""
+
+    session_token: Optional[str] = None
+    email: Optional[str] = None
+    senha: Optional[str] = None
+    codigo_2fa: Optional[str] = None
+    chave_secreta: Optional[str] = None
+    filtros: Optional[Dict[str, Any]] = None
+    aguardar_seg: int = 0
 
 
 class RelatorioCorridasInput(BaseModel):
@@ -1265,7 +1279,10 @@ async def notificacao_cancelar(
         raise _notificacao_http_erro(e)
 
 
-async def _sessao_relatorio(inp: "RelatorioClientesInput | RelatorioCorridasInput", x_session_token: SessionHeader = "") -> tuple[str, Any]:
+async def _sessao_relatorio(
+    inp: "RelatorioClientesInput | RelatorioCorridasInput | RelatorioMotoristasInput",
+    x_session_token: SessionHeader = "",
+) -> tuple[str, Any]:
     if inp.session_token or x_session_token:
         token = resolve_session_from_header(
             x_session_token,
@@ -1349,6 +1366,53 @@ async def relatorio_clientes_status(report_id: int, session_token: SessionTokenD
     try:
         st = await loop.run_in_executor(
             executor, lambda: verificar_relatorio(http, "clientes", report_id)
+        )
+        return {"sucesso": True, **st}
+    except Exception as e:
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/relatorio/motoristas/solicitar")
+async def relatorio_motoristas_solicitar(inp: RelatorioMotoristasInput, x_session_token: SessionHeader = ""):
+    """
+    Exporta motoristas ativos (aba Ativos + export assíncrono do painel /taxista/index).
+    Use credencial da cidade; contas com 2FA exigem `chave_secreta` ou `codigo_2fa`.
+    """
+    log.info("POST /relatorio/motoristas/solicitar email=%s aguardar=%s", inp.email, inp.aguardar_seg)
+    loop = asyncio.get_event_loop()
+    try:
+        check_heavy_limit("relatorio")
+        token, http = await _sessao_relatorio(inp, x_session_token)
+        filtros = dict(inp.filtros or {})
+        sol = await loop.run_in_executor(
+            executor, lambda: solicitar_relatorio(http, "motoristas", filtros)
+        )
+        out: Dict[str, Any] = {
+            "sucesso": True,
+            "session_token": token,
+            "report_id": sol["report_id"],
+            "status_export": sol["status_export"],
+            "pronto": False,
+            "url": None,
+        }
+        if inp.aguardar_seg > 0:
+            st = await _aguardar_relatorio_async(http, "motoristas", sol["report_id"], inp.aguardar_seg)
+            out.update({k: st[k] for k in ("status_export", "pronto", "cancelado", "url", "url_expira_em")})
+        return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Falha /relatorio/motoristas/solicitar: %s", e)
+        raise _notificacao_http_erro(e)
+
+
+@app.get("/relatorio/motoristas/status/{report_id}")
+async def relatorio_motoristas_status(report_id: int, session_token: SessionTokenDep):
+    http = _require_session(header_token=session_token)
+    loop = asyncio.get_event_loop()
+    try:
+        st = await loop.run_in_executor(
+            executor, lambda: verificar_relatorio(http, "motoristas", report_id)
         )
         return {"sucesso": True, **st}
     except Exception as e:
@@ -1979,4 +2043,4 @@ async def financeiro_historico_corridas(inp: FinanceiroHistoricoCorridasInput, r
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, proxy_headers=False)

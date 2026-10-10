@@ -9,12 +9,13 @@ O PHPSESSID fica preso ao IP de quem logou: login, solicitação e polling rodam
 from __future__ import annotations
 
 import calendar
+import json
 import logging
 import re
 import time
 import urllib.parse
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -25,6 +26,32 @@ from machine_notificacao_http import (
 )
 
 log = logging.getLogger(__name__)
+
+# Motoristas (/taxista/index) — painel taxistaIndex.js (v837+):
+# - Aba Ativos: status_taxista JSON '["A"]' (data-status-taxista="A").
+# - Filtrar: POST yiiGridView com TaxistaSearch (sessão); export usa o objeto `filter` em JS.
+# - Exportar: POST /taxista/solicitarExportarRelatorioTaxistas/ (campos flat, não TaxistaSearch[]).
+# - Status: GET /taxista/verificarStatusRelatorioTaxistas/{report_id} → statusExport + url S3.
+
+_MOTORISTAS_CAMPOS_EXPORT = (
+    "bandeira_id",
+    "nome",
+    "telefone",
+    "email",
+    "status_taxista",
+    "status_cadastro",
+    "vtr_bandeira",
+    "filtro_categoria_id",
+    "status_vencimento_cnh",
+    "status_vencimento_crlv",
+    "placa",
+    "criado_em_ini",
+    "criado_em_fim",
+    "taxista_apoio",
+    "cpf",
+    "ano_modelo_ini",
+    "ano_modelo_fim",
+)
 
 RELATORIOS: Dict[str, Dict[str, Any]] = {
     "clientes": {
@@ -45,6 +72,11 @@ RELATORIOS: Dict[str, Dict[str, Any]] = {
             "data_nascimento_ini": "",
             "data_nascimento_fim": "",
         },
+    },
+    "motoristas": {
+        "solicitar": "/taxista/solicitarExportarRelatorioTaxistas/",
+        "status": "/taxista/verificarStatusRelatorioTaxistas/{id}",
+        "referer": "/taxista/index",
     },
 }
 
@@ -88,11 +120,119 @@ def _expira_em_url(url: Optional[str]) -> Optional[int]:
         return None
 
 
+def _extrair_filter_taxista_index(html: str) -> Dict[str, str]:
+    texto = html or ""
+    if "var filter" not in texto:
+        raise RuntimeError("Não foi possível ler filtros padrão em /taxista/index.")
+
+    def _campo(chave: str, default: str = "") -> str:
+        m = re.search(
+            rf"['\"]{re.escape(chave)}['\"]\s*:\s*('(?:\\'|[^'])*'|\"(?:\\\"|[^\"])*\"|null)",
+            texto,
+        )
+        if not m:
+            return default
+        val = m.group(1)
+        if val == "null":
+            return ""
+        if val[0] in "'\"":
+            return val[1:-1]
+        return val
+
+    out: Dict[str, str] = {k: _campo(k) for k in _MOTORISTAS_CAMPOS_EXPORT}
+    if not out.get("bandeira_id"):
+        raise RuntimeError("bandeira_id ausente em /taxista/index — sessão pode estar sem bandeira.")
+    return out
+
+
+def _garantir_sessao_taxista(http: requests.Session) -> str:
+    r = http.get(
+        BASE_URL + "/taxista/index",
+        headers={"Referer": BASE_URL + "/", "Accept": "text/html,application/xhtml+xml"},
+        timeout=60,
+    )
+    if "site/login" in (r.url or "") or "LoginForm" in (r.text or "")[:12000]:
+        raise RuntimeError("Sessão inválida ou expirada — faça login novamente.")
+    if r.status_code == 403 or "não está autorizado" in (r.text or "")[:50000].lower():
+        raise RuntimeError("Login sem permissão para Motoristas na Machine.")
+    return r.text or ""
+
+
+def preparar_filtro_motoristas_ativos(
+    http: requests.Session,
+    extras: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
+    """
+    Equivalente à aba Ativos + filtros padrão da bandeira (categorias marcadas no painel).
+    Opcionalmente aplica POST /taxista/index (Filtrar) antes do export.
+    """
+    html = _garantir_sessao_taxista(http)
+    dados = _extrair_filter_taxista_index(html)
+    dados["status_taxista"] = '["A"]'
+    dados["status_cadastro"] = ""
+    for k, v in (extras or {}).items():
+        if k in dados and v is not None:
+            dados[k] = str(v) if not isinstance(v, (list, dict)) else json.dumps(v, separators=(",", ":"))
+
+    pairs: List[Tuple[str, str]] = []
+    for key, val in dados.items():
+        if key == "status_taxista" and val:
+            for st in json.loads(val):
+                pairs.append((f"TaxistaSearch[status_taxista][]", str(st)))
+        elif key == "status_cadastro" and val:
+            pairs.append(("TaxistaSearch[status_cadastro]", str(val)))
+        elif key == "filtro_categoria_id" and val:
+            try:
+                ids = json.loads(val)
+            except json.JSONDecodeError:
+                ids = []
+            for cid in ids:
+                pairs.append(("TaxistaSearch[filtro_categoria_id][]", str(cid)))
+        elif key in ("nome", "cpf", "email", "telefone", "placa", "vtr_bandeira", "taxista_apoio"):
+            pairs.append((f"TaxistaSearch[{key if key != 'vtr_bandeira' else 'vtr_bandeira'}]", val or ""))
+        elif key in ("criado_em_ini", "criado_em_fim", "ano_modelo_ini", "ano_modelo_fim"):
+            pairs.append((f"TaxistaSearch[{key}]", val or ""))
+
+    if pairs:
+        http.post(
+            BASE_URL + "/taxista/index",
+            data=dict(pairs),
+            headers={
+                "Referer": BASE_URL + "/taxista/index",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            timeout=90,
+        )
+    return dados
+
+
+def solicitar_relatorio_motoristas(
+    http: requests.Session,
+    filtros: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    cfg = _config("motoristas")
+    dados = preparar_filtro_motoristas_ativos(http, filtros)
+    r = http.post(BASE_URL + cfg["solicitar"], data=dados, headers=_headers(cfg), timeout=60)
+    data = _json_ou_sessao_expirada(r)
+    report_id = data.get("report_id")
+    if not data.get("success") or not report_id:
+        msg = data.get("message") or data.get("mensagem") or "Painel recusou a exportação de motoristas."
+        raise RuntimeError(f"{msg} (HTTP {r.status_code})")
+    log.info("relatorio motoristas solicitado report_id=%s", report_id)
+    return {
+        "report_id": int(report_id),
+        "status_export": data.get("statusExport"),
+        "tipo_processamento": data.get("tipo"),
+    }
+
+
 def solicitar_relatorio(
     http: requests.Session,
     tipo: str,
     filtros: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if tipo == "motoristas":
+        return solicitar_relatorio_motoristas(http, filtros)
     cfg = _config(tipo)
     dados = dict(cfg["filtros_padrao"])
     for k, v in (filtros or {}).items():
