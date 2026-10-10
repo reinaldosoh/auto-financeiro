@@ -995,6 +995,13 @@ def _resolve_chave_acao(session_token: str, chave_secreta: Optional[str]) -> Opt
     return None
 
 
+def _resolver_chave_login(email: str, chave_secreta: Optional[str]) -> Optional[str]:
+    """Corpo JSON ou cofre local da VPS (mesmo contrato que Integrações / POST /autenticar)."""
+    if chave_secreta and str(chave_secreta).strip():
+        return str(chave_secreta).replace(" ", "")
+    return obter_chave(email) or None
+
+
 def _require_session(*, header_token: str = "", body_token: Optional[str] = None):
     effective = resolve_session_from_header(header_token, body_token=body_token)
     http = get_session(effective)
@@ -1024,6 +1031,7 @@ async def notificacao_login_http(inp: NotificacaoLoginInput, request: Request):
     check_login_limits(inp.email, _client_ip(request))
     log.info("POST /notificacao/login email=%s", inp.email)
     loop = asyncio.get_event_loop()
+    chave = _resolver_chave_login(inp.email, inp.chave_secreta)
     try:
         resultado = await loop.run_in_executor(
             executor,
@@ -1031,7 +1039,7 @@ async def notificacao_login_http(inp: NotificacaoLoginInput, request: Request):
                 email=inp.email,
                 senha=inp.senha,
                 codigo_2fa=inp.codigo_2fa,
-                chave_secreta=inp.chave_secreta,
+                chave_secreta=chave,
                 gerar_codigo_fn=gerar_codigo,
             ),
         )
@@ -1294,6 +1302,7 @@ async def _sessao_relatorio(
             status_code=400,
             detail={"sucesso": False, "mensagem": "Informe session_token ou email + senha."},
         )
+    chave = _resolver_chave_login(inp.email, inp.chave_secreta)
     loop = asyncio.get_event_loop()
     login = await loop.run_in_executor(
         executor,
@@ -1301,7 +1310,7 @@ async def _sessao_relatorio(
             email=inp.email,
             senha=inp.senha,
             codigo_2fa=inp.codigo_2fa,
-            chave_secreta=inp.chave_secreta,
+            chave_secreta=chave,
             gerar_codigo_fn=gerar_codigo,
         ),
     )

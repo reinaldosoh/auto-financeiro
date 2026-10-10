@@ -252,6 +252,7 @@ def login_painel(
 
         elif data.get("solicitarCodigo2FA"):
             code = codigo_2fa
+            chave_disk: Optional[str] = None
             if not code and chave_secreta and gerar_codigo_fn:
                 code = gerar_codigo_fn(chave_secreta)
             if not code and gerar_codigo_fn:
@@ -259,12 +260,16 @@ def login_painel(
 
                 chave_salva = obter_chave(email)
                 if chave_salva:
+                    chave_disk = chave_salva
                     code = gerar_codigo_fn(chave_salva)
 
             if not code:
-                raise RuntimeError(
-                    "Conta exige código 2FA. Informe codigo_2fa ou chave_secreta."
-                )
+                from auto_2fa import mensagem_totp_ausente
+
+                raise RuntimeError(mensagem_totp_ausente("login"))
+
+            if not chave_secreta and chave_disk:
+                chave_secreta = chave_disk
 
             r2 = http.post(
                 BASE_URL + "/site/verificar2FA",
@@ -291,6 +296,14 @@ def login_painel(
             salva = obter_chave(email)
             if salva:
                 chave_totp = salva
+
+        if chave_totp:
+            try:
+                from auto_2fa import salvar_chave
+
+                salvar_chave(email, chave_totp)
+            except Exception as exc:
+                log.warning("Não foi possível persistir TOTP em disco para %s: %s", email, exc)
 
         out: Dict[str, Any] = {
             "sucesso": True,
