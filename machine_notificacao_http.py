@@ -236,6 +236,13 @@ def login_painel(
                 from auto_2fa import gerar_codigo as _gerar
 
                 gerar_codigo_fn = _gerar
+            # Persiste antes de validar: se o POST falhar, o segredo não se perde no redeploy.
+            try:
+                from auto_2fa import salvar_chave
+
+                salvar_chave(email, secret)
+            except Exception as exc:
+                log.warning("Não foi possível persistir TOTP (pré-cadastro) para %s: %s", email, exc)
             code = gerar_codigo_fn(secret)
             r_reg = http.post(
                 BASE_URL + "/site/validarCadastro2FA",
