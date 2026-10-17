@@ -54,6 +54,9 @@ Endpoints:
     DELETE /notificacao/{id}          - Cancela/exclui campanha agendada
     GET  /passageiro/{id}             - Ficha cadastroPassageiro (session_token)
     POST /passageiro/ficha            - Mesmo, body {session_token, id_machine}
+    POST /taxista/relacao             - Altera Relação (prioritário/secundário) em /taxista/update/{id}
+    POST /taxista/prioridade/ativar   - Mesmo login da cidade; define motorista prioritário
+    POST /taxista/prioridade/remover  - Mesmo login; volta para secundário (não exclui cadastro)
     POST /relatorio/clientes/solicitar - Exporta base de clientes (CSV S3); opcional aguardar_seg
     GET  /relatorio/clientes/status/{id} - Polling da exportação de clientes (url quando pronto)
     POST /relatorio/motoristas/solicitar - Exporta motoristas ativos (/taxista/index); credencial cidade + 2FA
@@ -123,6 +126,7 @@ from machine_dashboard_http import (
     obter_posicao_corrida,
 )
 from machine_passageiro_http import obter_ficha_passageiro
+from machine_taxista_http import atualizar_relacao_taxista
 from machine_relatorio_http import (
     AGUARDAR_MAX_SEG,
     CORRIDAS_QTD_JANELAS,
@@ -162,7 +166,7 @@ import urllib.request
 import secrets
 import time
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -394,6 +398,21 @@ class NotificacaoCancelarInput(BaseModel):
 class PassageiroFichaInput(BaseModel):
     session_token: Optional[str] = None
     id_machine: str
+
+
+class TaxistaPrioridadeInput(BaseModel):
+    """Mesmo contrato de `/relatorio/motoristas/solicitar`: session_token ou email + senha."""
+
+    taxista_id: int
+    session_token: Optional[str] = None
+    email: Optional[str] = None
+    senha: Optional[str] = None
+    codigo_2fa: Optional[str] = None
+    chave_secreta: Optional[str] = None
+
+
+class TaxistaRelacaoInput(TaxistaPrioridadeInput):
+    relacao: Literal["prioritario", "secundario"]
 
 
 class RelatorioClientesInput(BaseModel):
@@ -1287,6 +1306,37 @@ async def notificacao_cancelar(
         raise _notificacao_http_erro(e)
 
 
+async def _sessao_taxista_prioridade(
+    inp: TaxistaPrioridadeInput,
+    x_session_token: SessionHeader = "",
+) -> tuple[str, Any]:
+    if inp.session_token or x_session_token:
+        token = resolve_session_from_header(
+            x_session_token,
+            body_token=inp.session_token,
+        )
+        return token, _require_session(header_token=token)
+    if not inp.email or not inp.senha:
+        raise HTTPException(
+            status_code=400,
+            detail={"sucesso": False, "mensagem": "Informe session_token ou email + senha."},
+        )
+    chave = _resolver_chave_login(inp.email, inp.chave_secreta)
+    loop = asyncio.get_event_loop()
+    login = await loop.run_in_executor(
+        executor,
+        lambda: login_painel(
+            email=inp.email,
+            senha=inp.senha,
+            codigo_2fa=inp.codigo_2fa,
+            chave_secreta=chave,
+            gerar_codigo_fn=gerar_codigo,
+        ),
+    )
+    token = login["session_token"]
+    return token, _require_session(header_token=token)
+
+
 async def _sessao_relatorio(
     inp: "RelatorioClientesInput | RelatorioCorridasInput | RelatorioMotoristasInput",
     x_session_token: SessionHeader = "",
@@ -1608,6 +1658,77 @@ async def passageiro_ficha_post(inp: PassageiroFichaInput, x_session_token: Sess
         return {"sucesso": True, **ficha}
     except Exception as e:
         raise _notificacao_http_erro(e)
+
+
+async def _taxista_alterar_relacao(
+    inp: TaxistaPrioridadeInput,
+    relacao: Literal["prioritario", "secundario"],
+    request: Request,
+    rota_log: str,
+    x_session_token: SessionHeader = "",
+):
+    if inp.email and not (inp.session_token or x_session_token):
+        check_login_limits(inp.email, _client_ip(request))
+    log.info(
+        "%s taxista_id=%s relacao=%s session=%s",
+        rota_log,
+        inp.taxista_id,
+        relacao,
+        token_log_prefix(inp.session_token or x_session_token),
+    )
+    try:
+        session_token, http = await _sessao_taxista_prioridade(inp, x_session_token)
+        chave = _resolve_chave_acao(session_token, inp.chave_secreta)
+        resultado = await _executor_heavy(
+            atualizar_relacao_taxista,
+            http,
+            inp.taxista_id,
+            relacao,
+            chave_secreta=chave,
+            gerar_codigo_fn=gerar_codigo,
+        )
+        return {"sucesso": True, **resultado}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Falha %s taxista_id=%s: %s", rota_log, inp.taxista_id, e)
+        raise _notificacao_http_erro(e)
+
+
+@app.post("/taxista/prioridade/ativar")
+async def taxista_prioridade_ativar(
+    inp: TaxistaPrioridadeInput,
+    request: Request,
+    x_session_token: SessionHeader = "",
+):
+    """Prioritário no painel — credenciais iguais à exportação de motoristas / notificação."""
+    return await _taxista_alterar_relacao(
+        inp, "prioritario", request, "POST /taxista/prioridade/ativar", x_session_token
+    )
+
+
+@app.post("/taxista/prioridade/remover")
+async def taxista_prioridade_remover(
+    inp: TaxistaPrioridadeInput,
+    request: Request,
+    x_session_token: SessionHeader = "",
+):
+    """Secundário no painel (remove prioridade; não apaga o condutor)."""
+    return await _taxista_alterar_relacao(
+        inp, "secundario", request, "POST /taxista/prioridade/remover", x_session_token
+    )
+
+
+@app.post("/taxista/relacao")
+async def taxista_relacao(
+    inp: TaxistaRelacaoInput,
+    request: Request,
+    x_session_token: SessionHeader = "",
+):
+    """Alias com `relacao` explícito no JSON (prioritario | secundario)."""
+    return await _taxista_alterar_relacao(
+        inp, inp.relacao, request, "POST /taxista/relacao", x_session_token
+    )
 
 
 @app.get("/dashboard-v2/bandeiras")
