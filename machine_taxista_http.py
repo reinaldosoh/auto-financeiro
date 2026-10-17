@@ -92,11 +92,16 @@ class _TaxistaFormParser:
             r'<select[^>]+name="([^"]+)"[^>]*>(.*?)</select>', form, re.S | re.I
         ):
             name = sm.group(1)
-            selected = re.findall(
-                r'<option[^>]*selected[^>]*value="([^"]*)"', sm.group(2), re.I
-            )
-            if selected:
-                fields[name].extend(selected)
+            chosen: Optional[str] = None
+            for om in re.finditer(r"<option([^>]*)>", sm.group(2), re.I):
+                attrs = om.group(1)
+                if "selected" not in attrs.lower():
+                    continue
+                val_m = re.search(r'value="([^"]*)"', attrs, re.I)
+                chosen = val_m.group(1) if val_m else ""
+                break
+            if chosen is not None:
+                fields[name].append(chosen)
             else:
                 first = re.search(r'<option[^>]*value="([^"]*)"', sm.group(2), re.I)
                 if first:
@@ -207,6 +212,38 @@ def descobrir_campo_relacao(html: str) -> Tuple[str, Dict[str, str]]:
     return best[0], best[1]
 
 
+def _autenticar_acao_taxista(
+    http: requests.Session,
+    referer_url: str,
+    chave_secreta: Optional[str],
+    gerar_codigo_fn: Optional[Any],
+) -> None:
+    code = None
+    if chave_secreta and gerar_codigo_fn:
+        code = gerar_codigo_fn(chave_secreta)
+    if not code:
+        autenticar_acao_2fa(
+            http,
+            chave_secreta=chave_secreta,
+            gerar_codigo_fn=gerar_codigo_fn,
+        )
+        return
+    r = http.post(
+        BASE_URL + "/site/autenticarUsuario2FA",
+        data={"code": code},
+        headers={"Referer": referer_url},
+        timeout=30,
+    )
+    from machine_notificacao_http import _parse_json_response
+
+    data = _parse_json_response(r)
+    if not data.get("success"):
+        msg = data.get("message") or "Falha na autenticação 2FA da ação."
+        if data.get("usuarioBloqueado"):
+            raise RuntimeError(f"Usuário bloqueado: {msg}")
+        raise RuntimeError(msg)
+
+
 def _resposta_precisa_2fa_acao(response: requests.Response) -> bool:
     lower = (response.text or "").lower()
     return (
@@ -221,14 +258,95 @@ def _set_field(fields: Dict[str, List[str]], name: str, value: str) -> None:
     fields[name] = [value]
 
 
-def _pairs_from_fields(fields: Dict[str, List[str]]) -> List[Tuple[str, str]]:
+def _normalizar_telefone_taxista(valor: str) -> str:
+    """Painel rejeita +55 no POST; formato (DD) 9XXXX-XXXX grava."""
+    digitos = re.sub(r"\D+", "", valor or "")
+    if digitos.startswith("55") and len(digitos) >= 12:
+        digitos = digitos[2:]
+    if len(digitos) == 11:
+        return f"({digitos[:2]}) {digitos[2:7]}-{digitos[7:]}"
+    if len(digitos) == 10:
+        return f"({digitos[:2]}) {digitos[2:6]}-{digitos[6:]}"
+    return (valor or "").strip()
+
+
+def _ajustar_vinculo_relacao(
+    fields: Dict[str, List[str]], field_relacao: str, relacao: RelacaoTaxista
+) -> None:
+    if field_relacao != "Taxista[taxista_apoio]":
+        return
+    if relacao == "secundario":
+        _set_field(fields, "Taxista[vinculo]", "")
+    elif relacao == "prioritario" and not (fields.get("Taxista[vinculo]") or [""])[0]:
+        _set_field(fields, "Taxista[vinculo]", "T")
+
+
+def _preparar_campos_taxista_post(
+    fields: Dict[str, List[str]],
+    field_relacao: str,
+    relacao: RelacaoTaxista,
+) -> Dict[str, List[str]]:
+    if "Taxista[telefone]" in fields and fields["Taxista[telefone]"]:
+        tel = _normalizar_telefone_taxista(fields["Taxista[telefone]"][0])
+        _set_field(fields, "Taxista[telefone]", tel)
+    _ajustar_vinculo_relacao(fields, field_relacao, relacao)
+    return _limpar_campos_para_post(fields)
+
+
+def _limpar_campos_para_post(fields: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    """Remove linhas template do painel (ex.: Veiculos[__INDEX__]) que quebram o POST Yii."""
+    out: Dict[str, List[str]] = {}
+    for name, values in fields.items():
+        if "[__INDEX__]" in name or name.endswith("[__INDEX__]"):
+            continue
+        cleaned = [v for v in values if v is not None]
+        if cleaned:
+            out[name] = cleaned
+    return out
+
+
+def _extrair_botao_submit(html: str) -> Tuple[str, str]:
+    """Botão Gravar do painel: name=yt0, value=Gravar (Yii)."""
+    form = _TaxistaFormParser._form_html(html)
+    m = re.search(
+        r'<button[^>]+type="submit"[^>]+name="(yt\d+)"[^>]*>([^<]*)</button>',
+        form,
+        re.I,
+    )
+    if m:
+        return m.group(1), unescape(m.group(2)).strip() or "Gravar"
+    m = re.search(
+        r'<input[^>]+type="submit"[^>]+name="(yt\d+)"[^>]*value="([^"]*)"',
+        form,
+        re.I,
+    )
+    if m:
+        return m.group(1), m.group(2)
+    return "yt0", "Gravar"
+
+
+def _pairs_from_fields(
+    fields: Dict[str, List[str]], html: str
+) -> List[Tuple[str, str]]:
     pairs: List[Tuple[str, str]] = []
     for name, values in fields.items():
         for val in values:
             pairs.append((name, val))
-    if not any(n.startswith("yt") for n in fields):
-        pairs.append(("yt0", "Salvar"))
+    btn_name, btn_val = _extrair_botao_submit(html)
+    pairs.append((btn_name, btn_val))
     return pairs
+
+
+def _valor_campo_no_html(html: str, field_name: str) -> str:
+    for sel in _TaxistaFormParser.list_selects(html):
+        if sel["name"] != field_name:
+            continue
+        for opt in sel["options"]:
+            if opt.get("selected"):
+                return str(opt.get("value") or "")
+    parsed = _TaxistaFormParser.parse(html)
+    vals = parsed.get(field_name) or []
+    return vals[0] if vals else ""
 
 
 def carregar_form_taxista(http: requests.Session, taxista_id: int) -> Tuple[Dict[str, List[str]], str]:
@@ -260,15 +378,22 @@ def atualizar_relacao_taxista(
     antes = (fields.get(field_name) or [""])[0]
     novo = value_map[relacao]
     _set_field(fields, field_name, novo)
+    fields = _preparar_campos_taxista_post(fields, field_name, relacao)
 
     url = f"{BASE_URL}/taxista/update/{int(taxista_id)}"
-    pairs = _pairs_from_fields(fields)
-    headers = {"Referer": url}
+    pairs = _pairs_from_fields(fields, html)
+    headers = {
+        "Referer": url,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    if chave_secreta and gerar_codigo_fn:
+        _autenticar_acao_taxista(http, url, chave_secreta, gerar_codigo_fn)
 
     r = http.post(url, data=pairs, headers=headers, timeout=180, allow_redirects=True)
     if _resposta_precisa_2fa_acao(r):
         log.info("Gravar taxista pediu 2FA de ação — autenticando…")
-        autenticar_acao_2fa(http, chave_secreta=chave_secreta, gerar_codigo_fn=gerar_codigo_fn)
+        _autenticar_acao_taxista(http, url, chave_secreta, gerar_codigo_fn)
         r = http.post(url, data=pairs, headers=headers, timeout=180, allow_redirects=True)
 
     text = r.text or ""
@@ -276,6 +401,7 @@ def atualizar_relacao_taxista(
         raise RuntimeError("Sessão expirada ao gravar taxista.")
 
     erros = re.findall(r'class="errorMessage[^"]*"[^>]*>([^<]+)', text)
+    erros += re.findall(r'class="help-block error"[^>]*>([^<]+)', text)
     if erros:
         raise RuntimeError("; ".join(e.strip() for e in erros if e.strip()))
 
@@ -285,6 +411,13 @@ def atualizar_relacao_taxista(
             msgs = re.findall(r"<li[^>]*>([^<]+)", m.group(1))
             if msgs:
                 raise RuntimeError("; ".join(s.strip() for s in msgs if s.strip()))
+
+    _, html_depois = carregar_form_taxista(http, taxista_id)
+    gravado = _valor_campo_no_html(html_depois, field_name)
+    if gravado != novo:
+        raise RuntimeError(
+            f"Painel não gravou {field_name}: esperado value={novo!r}, lido={gravado!r} após POST."
+        )
 
     log.info(
         "taxista %s relação %s: campo=%s %s -> %s",
