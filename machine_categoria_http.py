@@ -243,15 +243,6 @@ def _valor_select(html: str, field_name: str) -> str:
     return vals[0] if vals else ""
 
 
-def _exibir_app_na_lista_tarifa(
-    http: requests.Session, categoria_id: int
-) -> bool:
-    for cat in listar_categorias_tarifa(http):
-        if int(cat["categoria_id"]) == int(categoria_id):
-            return bool(cat.get("exibir_app"))
-    raise RuntimeError(f"Categoria {categoria_id} não encontrada em /categoria/tarifa.")
-
-
 def _validar_exibir_persistido(
     http: requests.Session,
     categoria_id: int,

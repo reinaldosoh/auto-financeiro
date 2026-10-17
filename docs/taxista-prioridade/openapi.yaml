@@ -1,0 +1,352 @@
+openapi: 3.0.3
+info:
+  title: Machine VPS API — Prioridade do motorista (Relação)
+  version: "1.0.0"
+  description: |
+    API server-to-server para alterar a **Relação** do condutor no painel TaxiMachine
+    (**Motorista prioritário** ↔ **Motorista secundário**).
+
+    No formulário `/taxista/update/{id}`, o painel usa o campo `Taxista[taxista_apoio]`:
+    - **prioritário** → valor mapeado pelo painel (ex.: `0`)
+    - **secundário** → valor mapeado (ex.: `1`)
+
+    **Autenticação**
+    1. **`X-API-Key`** — obrigatória em todas as requisições.
+    2. **Painel** — credenciais da **cidade** (e-mail, senha, TOTP) **ou** sessão via header **`X-Session-Token`**
+       (retornado por `POST /notificacao/login`).
+
+    **Importante:** não envie `session_token` no JSON — use apenas o header `X-Session-Token`.
+
+    **2FA de ação** — gravar o taxista pode exigir TOTP; envie `chave_secreta` no body quando não houver
+    TOTP pré-configurado no servidor (`POST /autenticar`).
+
+    **Identificador** — `taxista_id` é o ID numérico do motorista no painel (ex.: coluna ID / URL `/taxista/update/772770`).
+
+servers:
+  - url: https://reinaldo-automachine.sw5bxa.easypanel.host
+    description: Produção (URL informada pelo operador da VPS)
+  - url: http://127.0.0.1:8000
+    description: Desenvolvimento local
+
+tags:
+  - name: Sistema
+  - name: Sessão
+  - name: Taxista — prioridade
+    description: Ativar ou remover prioridade (relação no cadastro)
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [Sistema]
+      summary: Health check
+      operationId: health
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/UnauthorizedApiKey"
+
+  /notificacao/login:
+    post:
+      tags: [Sessão]
+      summary: Login no painel Machine
+      description: Retorna `session_token` (~30 min). Use no header `X-Session-Token` nas rotas de taxista.
+      operationId: notificacaoLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginPainelInput"
+      responses:
+        "200":
+          description: Login OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginPainelResponse"
+        "401":
+          $ref: "#/components/responses/UnauthorizedApiKey"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+
+  /taxista/prioridade/ativar:
+    post:
+      tags: ["Taxista — prioridade"]
+      summary: Dar prioridade ao motorista
+      description: |
+        Define a relação **prioritário** para o `taxista_id` informado.
+        Equivalente a escolher "Motorista prioritário" em **Relação** no cadastro do taxista.
+      operationId: taxistaPrioridadeAtivar
+      parameters:
+        - $ref: "#/components/parameters/SessionTokenHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaxistaPrioridadeInput"
+            examples:
+              com_sessao:
+                summary: Com X-Session-Token (recomendado)
+                value:
+                  taxista_id: 772770
+              com_credenciais:
+                summary: Login automático no body
+                value:
+                  taxista_id: 772770
+                  email: cidade@exemplo.com
+                  senha: "***"
+                  chave_secreta: JBSWY3DPEHPK3PXP
+      responses:
+        "200":
+          description: Prioridade aplicada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaxistaRelacaoResponse"
+              example:
+                sucesso: true
+                taxista_id: 772770
+                relacao: prioritario
+                campo: Taxista[taxista_apoio]
+                valor_anterior: "1"
+                valor_aplicado: "0"
+        "400":
+          $ref: "#/components/responses/ErroNegocio"
+        "401":
+          $ref: "#/components/responses/UnauthorizedSession"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+
+  /taxista/prioridade/remover:
+    post:
+      tags: ["Taxista — prioridade"]
+      summary: Remover prioridade (secundário)
+      description: |
+        Define a relação **secundário** — remove a prioridade **sem excluir** o cadastro do motorista.
+      operationId: taxistaPrioridadeRemover
+      parameters:
+        - $ref: "#/components/parameters/SessionTokenHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaxistaPrioridadeInput"
+            example:
+              taxista_id: 772770
+      responses:
+        "200":
+          description: Secundário aplicado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaxistaRelacaoResponse"
+              example:
+                sucesso: true
+                taxista_id: 772770
+                relacao: secundario
+                campo: Taxista[taxista_apoio]
+                valor_anterior: "0"
+                valor_aplicado: "1"
+        "400":
+          $ref: "#/components/responses/ErroNegocio"
+        "401":
+          $ref: "#/components/responses/UnauthorizedSession"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+
+  /taxista/relacao:
+    post:
+      tags: ["Taxista — prioridade"]
+      summary: Alterar relação (alias genérico)
+      description: |
+        Mesmo comportamento de ativar/remover, com `relacao` explícito no JSON:
+        `prioritario` ou `secundario`.
+      operationId: taxistaRelacao
+      parameters:
+        - $ref: "#/components/parameters/SessionTokenHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaxistaRelacaoInput"
+            example:
+              taxista_id: 772770
+              relacao: prioritario
+      responses:
+        "200":
+          description: Relação aplicada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaxistaRelacaoResponse"
+        "400":
+          $ref: "#/components/responses/ErroNegocio"
+        "401":
+          $ref: "#/components/responses/UnauthorizedSession"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    SessionTokenHeader:
+      name: X-Session-Token
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+      description: Token de `POST /notificacao/login` (obrigatório se não enviar e-mail/senha no body)
+
+  schemas:
+    LoginPainelInput:
+      type: object
+      required: [email, senha]
+      properties:
+        email:
+          type: string
+          format: email
+        senha:
+          type: string
+          format: password
+        codigo_2fa:
+          type: string
+        chave_secreta:
+          type: string
+          description: Segredo TOTP Base32
+
+    LoginPainelResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        session_token:
+          type: string
+          format: uuid
+        sucesso:
+          type: boolean
+        mensagem:
+          type: string
+
+    CidadePainelInput:
+      type: object
+      description: Credenciais opcionais se usar X-Session-Token
+      properties:
+        email:
+          type: string
+          format: email
+        senha:
+          type: string
+          format: password
+        codigo_2fa:
+          type: string
+        chave_secreta:
+          type: string
+
+    TaxistaPrioridadeInput:
+      allOf:
+        - $ref: "#/components/schemas/CidadePainelInput"
+        - type: object
+          required: [taxista_id]
+          properties:
+            taxista_id:
+              type: integer
+              description: ID do motorista no painel Machine
+              example: 772770
+
+    TaxistaRelacaoInput:
+      allOf:
+        - $ref: "#/components/schemas/TaxistaPrioridadeInput"
+        - type: object
+          required: [relacao]
+          properties:
+            relacao:
+              type: string
+              enum: [prioritario, secundario]
+
+    TaxistaRelacaoResponse:
+      type: object
+      properties:
+        sucesso:
+          type: boolean
+        taxista_id:
+          type: integer
+        relacao:
+          type: string
+          enum: [prioritario, secundario]
+        campo:
+          type: string
+          description: Nome do campo no POST do painel (ex. Taxista[taxista_apoio])
+        valor_anterior:
+          type: string
+        valor_aplicado:
+          type: string
+
+    ErroDetail:
+      type: object
+      properties:
+        sucesso:
+          type: boolean
+          example: false
+        mensagem:
+          type: string
+
+  responses:
+    UnauthorizedApiKey:
+      description: X-API-Key ausente ou inválida
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                type: string
+    UnauthorizedSession:
+      description: Sessão inválida ou session_token no body
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                $ref: "#/components/schemas/ErroDetail"
+    ErroNegocio:
+      description: Validação ou painel rejeitou o POST
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                oneOf:
+                  - $ref: "#/components/schemas/ErroDetail"
+                  - type: string
+    RateLimit:
+      description: Muitas tentativas de login
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                $ref: "#/components/schemas/ErroDetail"

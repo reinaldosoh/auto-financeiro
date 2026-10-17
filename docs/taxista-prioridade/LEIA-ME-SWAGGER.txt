@@ -1,0 +1,20 @@
+SWAGGER — prioridade do motorista (ativar / remover)
+====================================================
+
+IMPORTAR NO SWAGGER EDITOR (recomendado):
+  https://editor.swagger.io/ → File → Import file
+
+Arquivo OpenAPI (caminho absoluto no seu Mac):
+  /Users/reinaldofc/Documents/BANNER MACHINE/auto-financeiro-repo/docs/taxista-prioridade/openapi.yaml
+
+swagger.html + servidor local (opcional):
+  cd ".../docs/taxista-prioridade"
+  python3 -m http.server 8766
+  http://127.0.0.1:8766/swagger.html
+
+X-API-Key: Easypanel → auto-financeiro → Environment → MACHINE_API_KEY
+
+Rotas documentadas:
+  POST /taxista/prioridade/ativar   → motorista prioritário
+  POST /taxista/prioridade/remover  → motorista secundário
+  POST /taxista/relacao             → alias com campo relacao
