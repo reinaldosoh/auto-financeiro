@@ -57,6 +57,9 @@ Endpoints:
     POST /taxista/relacao             - Altera Relação (prioritário/secundário) em /taxista/update/{id}
     POST /taxista/prioridade/ativar   - Mesmo login da cidade; define motorista prioritário
     POST /taxista/prioridade/remover  - Mesmo login; volta para secundário (não exclui cadastro)
+    POST /categoria/listar            - Lista categorias /categoria/tarifa (nome, ordem, exibir)
+    PATCH /categoria/ordem            - Define posição por nome da categoria
+    PATCH /categoria/exibir           - Exibir ou ocultar categoria no app passageiro
     POST /relatorio/clientes/solicitar - Exporta base de clientes (CSV S3); opcional aguardar_seg
     GET  /relatorio/clientes/status/{id} - Polling da exportação de clientes (url quando pronto)
     POST /relatorio/motoristas/solicitar - Exporta motoristas ativos (/taxista/index); credencial cidade + 2FA
@@ -127,6 +130,11 @@ from machine_dashboard_http import (
 )
 from machine_passageiro_http import obter_ficha_passageiro
 from machine_taxista_http import atualizar_relacao_taxista
+from machine_categoria_http import (
+    definir_exibicao_app_por_nome,
+    definir_ordem_por_nome,
+    listar_categorias_tarifa,
+)
 from machine_relatorio_http import (
     AGUARDAR_MAX_SEG,
     CORRIDAS_QTD_JANELAS,
@@ -400,15 +408,37 @@ class PassageiroFichaInput(BaseModel):
     id_machine: str
 
 
-class TaxistaPrioridadeInput(BaseModel):
-    """Mesmo contrato de `/relatorio/motoristas/solicitar`: session_token ou email + senha."""
+class CidadePainelInput(BaseModel):
+    """Credenciais da cidade no painel Machine (session_token ou email + senha)."""
 
-    taxista_id: int
     session_token: Optional[str] = None
     email: Optional[str] = None
     senha: Optional[str] = None
     codigo_2fa: Optional[str] = None
     chave_secreta: Optional[str] = None
+
+
+class TaxistaPrioridadeInput(CidadePainelInput):
+    """Mesmo contrato de `/relatorio/motoristas/solicitar`."""
+
+    taxista_id: int
+
+
+class CategoriaOrdemInput(CidadePainelInput):
+    nome: str
+    posicao: int
+
+    @field_validator("posicao")
+    @classmethod
+    def _posicao_positiva(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("posicao deve ser >= 1")
+        return v
+
+
+class CategoriaExibirInput(CidadePainelInput):
+    nome: str
+    exibir: bool
 
 
 class TaxistaRelacaoInput(TaxistaPrioridadeInput):
@@ -1306,8 +1336,8 @@ async def notificacao_cancelar(
         raise _notificacao_http_erro(e)
 
 
-async def _sessao_taxista_prioridade(
-    inp: TaxistaPrioridadeInput,
+async def _sessao_painel_cidade(
+    inp: CidadePainelInput,
     x_session_token: SessionHeader = "",
 ) -> tuple[str, Any]:
     if inp.session_token or x_session_token:
@@ -1335,6 +1365,13 @@ async def _sessao_taxista_prioridade(
     )
     token = login["session_token"]
     return token, _require_session(header_token=token)
+
+
+async def _sessao_taxista_prioridade(
+    inp: TaxistaPrioridadeInput,
+    x_session_token: SessionHeader = "",
+) -> tuple[str, Any]:
+    return await _sessao_painel_cidade(inp, x_session_token)
 
 
 async def _sessao_relatorio(
@@ -1729,6 +1766,92 @@ async def taxista_relacao(
     return await _taxista_alterar_relacao(
         inp, inp.relacao, request, "POST /taxista/relacao", x_session_token
     )
+
+
+@app.post("/categoria/listar")
+async def categoria_listar(
+    inp: CidadePainelInput,
+    request: Request,
+    x_session_token: SessionHeader = "",
+):
+    """Lista categorias de tarifa (id, nome, ordem, exibir_app)."""
+    if inp.email and not (inp.session_token or x_session_token):
+        check_login_limits(inp.email, _client_ip(request))
+    try:
+        _, http = await _sessao_painel_cidade(inp, x_session_token)
+        categorias = await _executor_heavy(listar_categorias_tarifa, http)
+        return {"sucesso": True, "total": len(categorias), "categorias": categorias}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Falha POST /categoria/listar: %s", e)
+        raise _notificacao_http_erro(e)
+
+
+@app.patch("/categoria/ordem")
+async def categoria_ordem(
+    inp: CategoriaOrdemInput,
+    request: Request,
+    x_session_token: SessionHeader = "",
+):
+    if inp.email and not (inp.session_token or x_session_token):
+        check_login_limits(inp.email, _client_ip(request))
+    log.info(
+        "PATCH /categoria/ordem nome=%s posicao=%s session=%s",
+        inp.nome,
+        inp.posicao,
+        token_log_prefix(inp.session_token or x_session_token),
+    )
+    try:
+        session_token, http = await _sessao_painel_cidade(inp, x_session_token)
+        chave = _resolve_chave_acao(session_token, inp.chave_secreta)
+        resultado = await _executor_heavy(
+            definir_ordem_por_nome,
+            http,
+            inp.nome,
+            inp.posicao,
+            chave_secreta=chave,
+            gerar_codigo_fn=gerar_codigo,
+        )
+        return {"sucesso": True, **resultado}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Falha PATCH /categoria/ordem: %s", e)
+        raise _notificacao_http_erro(e)
+
+
+@app.patch("/categoria/exibir")
+async def categoria_exibir(
+    inp: CategoriaExibirInput,
+    request: Request,
+    x_session_token: SessionHeader = "",
+):
+    if inp.email and not (inp.session_token or x_session_token):
+        check_login_limits(inp.email, _client_ip(request))
+    log.info(
+        "PATCH /categoria/exibir nome=%s exibir=%s session=%s",
+        inp.nome,
+        inp.exibir,
+        token_log_prefix(inp.session_token or x_session_token),
+    )
+    try:
+        session_token, http = await _sessao_painel_cidade(inp, x_session_token)
+        chave = _resolve_chave_acao(session_token, inp.chave_secreta)
+        resultado = await _executor_heavy(
+            definir_exibicao_app_por_nome,
+            http,
+            inp.nome,
+            inp.exibir,
+            chave_secreta=chave,
+            gerar_codigo_fn=gerar_codigo,
+        )
+        return {"sucesso": True, **resultado}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Falha PATCH /categoria/exibir: %s", e)
+        raise _notificacao_http_erro(e)
 
 
 @app.get("/dashboard-v2/bandeiras")
