@@ -427,6 +427,7 @@ class TaxistaPrioridadeInput(CidadePainelInput):
 class CategoriaOrdemInput(CidadePainelInput):
     nome: str
     posicao: int
+    exibir: Optional[bool] = None
 
     @field_validator("posicao")
     @classmethod
@@ -1810,6 +1811,7 @@ async def categoria_ordem(
             http,
             inp.nome,
             inp.posicao,
+            exibir=inp.exibir,
             chave_secreta=chave,
             gerar_codigo_fn=gerar_codigo,
         )

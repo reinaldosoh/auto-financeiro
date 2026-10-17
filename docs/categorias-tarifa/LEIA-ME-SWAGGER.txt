@@ -1,0 +1,27 @@
+SWAGGER / OPENAPI — categorias VPS
+==================================
+
+ARQUIVO PARA IMPORTAR (não use swagger.html no editor):
+  /Users/reinaldofc/Documents/BANNER MACHINE/auto-financeiro-repo/docs/categorias-tarifa/openapi.yaml
+
+No Swagger Editor (recomendado, sem servidor local):
+  1. Abra https://editor.swagger.io/
+  2. Menu File → Import file
+  3. Selecione o arquivo openapi.yaml acima
+  4. Ajuste o "Server" para a URL da VPS
+  5. Botão Authorize → cole a X-API-Key
+
+Postman: Import → File → openapi.yaml
+
+swagger.html só funciona se você subir um servidor HTTP na pasta:
+  cd ".../docs/categorias-tarifa"
+  python3 -m http.server 8765
+  http://127.0.0.1:8765/swagger.html
+
+X-API-KEY (integrador)
+======================
+Não está no Git. Está na VPS (Easypanel):
+  App auto-financeiro → Environment → MACHINE_API_KEY
+
+Gere uma chave longa (32+ caracteres), cole lá, redeploy, e envie ao integrador
+por canal seguro (1Password, WhatsApp não é ideal).

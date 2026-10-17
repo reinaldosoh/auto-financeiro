@@ -1,0 +1,417 @@
+openapi: 3.0.3
+info:
+  title: Machine VPS API — Categorias de tarifa
+  version: "1.0.0"
+  description: |
+    API server-to-server para listar categorias de tarifa no painel TaxiMachine,
+    alterar **ordem de exibição** e **visibilidade no app passageiro**.
+
+    **Autenticação em duas camadas**
+    1. **`X-API-Key`** — obrigatória em todas as requisições (chave fornecida pelo operador da VPS).
+    2. **Painel Machine** — login da **cidade** (e-mail + senha + TOTP) ou reutilização de sessão via **`X-Session-Token`**.
+
+    **Fluxo recomendado**
+    1. `POST /notificacao/login` com credenciais da cidade → guardar `session_token` da resposta.
+    2. Nas rotas `/categoria/*`, enviar **`X-Session-Token: {token}`** e corpo JSON só com os campos da operação (`{}` em listar).
+    3. **Não** envie `session_token` no JSON — a API retorna `401` (use apenas o header).
+
+    **2FA em gravação** — alterar ordem ou exibição pode exigir TOTP de ação no painel.
+    Envie `chave_secreta` (Base32) no corpo na primeira chamada sem sessão, ou configure TOTP no servidor da VPS após `POST /autenticar`.
+
+    **Limites** — logins repetidos com e-mail/senha podem retornar `429`; prefira sessão após o primeiro login.
+
+servers:
+  - url: https://reinaldo-automachine.sw5bxa.easypanel.host
+    description: Produção (substitua pela URL que o operador informar)
+  - url: http://127.0.0.1:8000
+    description: Desenvolvimento local
+
+tags:
+  - name: Sistema
+    description: Saúde do serviço
+  - name: Sessão
+    description: Login HTTP no painel (cookie → session_token)
+  - name: Categorias tarifa
+    description: Lista, ordem e exibição no app passageiro
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [Sistema]
+      summary: Health check
+      operationId: health
+      responses:
+        "200":
+          description: Serviço operacional
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/UnauthorizedApiKey"
+        "503":
+          description: Configuração inválida (ex. MACHINE_API_KEY ausente no servidor)
+
+  /notificacao/login:
+    post:
+      tags: [Sessão]
+      summary: Login no painel Machine (HTTP)
+      description: |
+        Retorna `session_token` (UUID) válido por ~30 minutos no servidor da VPS.
+        Use esse valor no header **`X-Session-Token`** nas rotas `/categoria/*`.
+      operationId: notificacaoLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginPainelInput"
+            example:
+              email: cidade@exemplo.com
+              senha: "***"
+              chave_secreta: JBSWY3DPEHPK3PXP
+      responses:
+        "200":
+          description: Login OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginPainelResponse"
+        "400":
+          $ref: "#/components/responses/ErroNegocio"
+        "401":
+          $ref: "#/components/responses/UnauthorizedApiKey"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+
+  /categoria/listar:
+    post:
+      tags: [Categorias tarifa]
+      summary: Listar categorias de tarifa
+      description: |
+        Espelha a tela **Configurações → Categorias → Tarifa** do painel.
+        Retorna `nome` exato para usar em ordem/exibir.
+      operationId: categoriaListar
+      parameters:
+        - $ref: "#/components/parameters/SessionTokenHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CidadePainelInput"
+            examples:
+              com_sessao:
+                summary: Com sessão (recomendado)
+                value: {}
+              com_credenciais:
+                summary: Login automático (evite em loop — rate limit)
+                value:
+                  email: cidade@exemplo.com
+                  senha: "***"
+                  chave_secreta: JBSWY3DPEHPK3PXP
+      responses:
+        "200":
+          description: Lista de categorias
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoriaListarResponse"
+              example:
+                sucesso: true
+                total: 3
+                categorias:
+                  - categoria_id: 7479
+                    nome: Maçaneta
+                    ordem: 1
+                    exibir_app: true
+                  - categoria_id: 7480
+                    nome: Corrida Central
+                    ordem: 2
+                    exibir_app: false
+        "400":
+          $ref: "#/components/responses/ErroNegocio"
+        "401":
+          $ref: "#/components/responses/UnauthorizedSession"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+
+  /categoria/ordem:
+    patch:
+      tags: [Categorias tarifa]
+      summary: Definir posição da categoria por nome
+      description: |
+        Resolve a categoria pelo **nome** (normalização de acentos e maiúsculas).
+        Reordena por permutação quando necessário (várias categorias podem ser atualizadas).
+      operationId: categoriaOrdem
+      parameters:
+        - $ref: "#/components/parameters/SessionTokenHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CategoriaOrdemInput"
+            example:
+              nome: Maçaneta
+              posicao: 1
+              exibir: false
+      responses:
+        "200":
+          description: Ordem aplicada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoriaOrdemResponse"
+        "400":
+          $ref: "#/components/responses/ErroNegocio"
+        "401":
+          $ref: "#/components/responses/UnauthorizedSession"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+
+  /categoria/exibir:
+    patch:
+      tags: [Categorias tarifa]
+      summary: Exibir ou ocultar categoria no app passageiro
+      operationId: categoriaExibir
+      parameters:
+        - $ref: "#/components/parameters/SessionTokenHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CategoriaExibirInput"
+            example:
+              nome: Maçaneta
+              exibir: true
+      responses:
+        "200":
+          description: Exibição atualizada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoriaExibirResponse"
+        "400":
+          $ref: "#/components/responses/ErroNegocio"
+        "401":
+          $ref: "#/components/responses/UnauthorizedSession"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Chave server-to-server fornecida pelo operador da VPS
+
+  parameters:
+    SessionTokenHeader:
+      name: X-Session-Token
+      in: header
+      required: false
+      description: Token retornado por `POST /notificacao/login` (obrigatório após login se não enviar e-mail/senha no body)
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    LoginPainelInput:
+      type: object
+      required: [email, senha]
+      properties:
+        email:
+          type: string
+          format: email
+        senha:
+          type: string
+          format: password
+        codigo_2fa:
+          type: string
+          description: Código de 6 dígitos (só se o login pedir na hora)
+        chave_secreta:
+          type: string
+          description: Segredo TOTP Base32 (recomendado para contas com 2FA)
+
+    LoginPainelResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        session_token:
+          type: string
+          format: uuid
+        token:
+          type: string
+          description: Alias legado de session_token em algumas respostas
+        sucesso:
+          type: boolean
+        mensagem:
+          type: string
+
+    CidadePainelInput:
+      type: object
+      description: |
+        Com `X-Session-Token` no header, envie `{}` ou omita credenciais.
+        Sem header, informe `email` e `senha` (e `chave_secreta` se 2FA).
+      properties:
+        email:
+          type: string
+          format: email
+        senha:
+          type: string
+          format: password
+        codigo_2fa:
+          type: string
+        chave_secreta:
+          type: string
+
+    CategoriaItem:
+      type: object
+      properties:
+        categoria_id:
+          type: integer
+        nome:
+          type: string
+        ordem:
+          type: integer
+          minimum: 1
+        exibir_app:
+          type: boolean
+          description: Indicador derivado da listagem no painel (ícone / tooltip)
+
+    CategoriaListarResponse:
+      type: object
+      properties:
+        sucesso:
+          type: boolean
+        total:
+          type: integer
+        categorias:
+          type: array
+          items:
+            $ref: "#/components/schemas/CategoriaItem"
+
+    CategoriaOrdemInput:
+      allOf:
+        - $ref: "#/components/schemas/CidadePainelInput"
+        - type: object
+          required: [nome, posicao]
+          properties:
+            nome:
+              type: string
+              description: Nome exato retornado em `/categoria/listar`
+            posicao:
+              type: integer
+              minimum: 1
+              description: Posição na lista (1 = primeiro)
+            exibir:
+              type: boolean
+              nullable: true
+              description: |
+                Opcional. Se enviado, aplica exibir/ocultar no app passageiro
+                no mesmo fluxo (recomendado ao mudar ordem + visibilidade juntos).
+
+    CategoriaOrdemResponse:
+      type: object
+      properties:
+        sucesso:
+          type: boolean
+        categoria_id:
+          type: integer
+        nome:
+          type: string
+        ordem:
+          type: integer
+        alteradas:
+          type: integer
+          description: Quantidade de categorias cujo POST de update foi necessário
+        detalhes:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    CategoriaExibirInput:
+      allOf:
+        - $ref: "#/components/schemas/CidadePainelInput"
+        - type: object
+          required: [nome, exibir]
+          properties:
+            nome:
+              type: string
+            exibir:
+              type: boolean
+
+    CategoriaExibirResponse:
+      type: object
+      properties:
+        sucesso:
+          type: boolean
+        categoria_id:
+          type: integer
+        nome:
+          type: string
+        exibir_app:
+          type: boolean
+        valor_anterior:
+          type: boolean
+
+    ErroDetail:
+      type: object
+      properties:
+        sucesso:
+          type: boolean
+          example: false
+        mensagem:
+          type: string
+
+  responses:
+    UnauthorizedApiKey:
+      description: X-API-Key ausente ou inválida
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                type: string
+    UnauthorizedSession:
+      description: Sessão inválida ou session_token no body (use X-Session-Token)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                $ref: "#/components/schemas/ErroDetail"
+    ErroNegocio:
+      description: Falha de validação ou painel (mensagem em detail.mensagem)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                oneOf:
+                  - $ref: "#/components/schemas/ErroDetail"
+                  - type: string
+    RateLimit:
+      description: Muitas tentativas de login
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                $ref: "#/components/schemas/ErroDetail"

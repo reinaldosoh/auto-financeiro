@@ -6,6 +6,8 @@ Documentação interativa: **`GET {BASE_URL}/docs`** (Swagger UI).
 
 **Guia para outro time (banners via HTTP + 2FA, sem Selenium):** [`docs/banners/GUIA_INTEGRACAO_BANNERS_HTTP.md`](docs/banners/GUIA_INTEGRACAO_BANNERS_HTTP.md)
 
+**Integração categorias de tarifa (listar / ordem / exibir no app):** OpenAPI + Swagger em [`docs/categorias-tarifa/`](docs/categorias-tarifa/) — [`GUIA_INTEGRACAO_CATEGORIAS_VPS.md`](docs/categorias-tarifa/GUIA_INTEGRACAO_CATEGORIAS_VPS.md)
+
 ---
 
 ## Primeiro acesso (TOTP)
@@ -111,6 +113,9 @@ A API aceita strings para `indice`, `headless` e `manter_aberto` (ex.: N8N) e co
 | POST | `/notificacao/login` | Login HTTP no painel (cookie, **sem Selenium**) |
 | GET | `/notificacao/categorias` | Categorias para filtros de notificação em massa |
 | POST | `/notificacao/categorias` | Igual ao GET; aceita credenciais ou `session_token` |
+| POST | `/categoria/listar` | Categorias de tarifa (nome, ordem, exibir no app passageiro) |
+| PATCH | `/categoria/ordem` | Posição na lista por nome da categoria |
+| PATCH | `/categoria/exibir` | Exibir/ocultar categoria no app passageiro |
 | POST | `/relatorio/clientes/solicitar` | Exporta a base de clientes do painel (CSV no S3) |
 | GET | `/relatorio/clientes/status/{report_id}` | Status da exportação; `url` do CSV quando pronto |
 | POST | `/relatorio/corridas/solicitar` | Exporta corridas dos últimos 90 dias (3 janelas até ontem) em job de background |

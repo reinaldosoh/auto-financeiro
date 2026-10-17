@@ -143,9 +143,23 @@ def listar_categorias_tarifa(http: requests.Session) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for i, (cid, nome) in enumerate(pares):
         ordem = ordens[i] if i < len(ordens) else i + 1
-        bloco_ini = text.find(f"duplicarCategoria('{cid}'")
-        bloco = text[max(0, bloco_ini - 1200) : bloco_ini + 400] if bloco_ini >= 0 else ""
-        exibir_app = "phone_iphone" in bloco and "OCULTA" not in bloco.upper()
+        try:
+            _, html_up = carregar_form_categoria(http, int(cid))
+            exibir_app = _valor_exibir_app(html_up)
+        except Exception as exc:
+            log.warning(
+                "exibir_app categoria %s: fallback tarifa (%s)", cid, exc
+            )
+            bloco_ini = text.find(f"duplicarCategoria('{cid}'")
+            bloco = text[max(0, bloco_ini - 1200) : bloco_ini + 400] if bloco_ini >= 0 else ""
+            bloco_u = bloco.upper()
+            exibir_app = (
+                ("PHONE_IPHONE" in bloco_u or "DISPONÍVEL NO APLICATIVO" in bloco_u
+                 or "DISPONIVEL NO APLICATIVO" in bloco_u)
+                and "OCULTA" not in bloco_u
+                and "NÃO EXIBIDA" not in bloco_u
+                and "NAO EXIBIDA" not in bloco_u
+            )
         out.append(
             {
                 "categoria_id": int(cid),
@@ -227,6 +241,30 @@ def _valor_select(html: str, field_name: str) -> str:
     parsed = _CategoriaFormParser.parse(html)
     vals = parsed.get(field_name) or []
     return vals[0] if vals else ""
+
+
+def _exibir_app_na_lista_tarifa(
+    http: requests.Session, categoria_id: int
+) -> bool:
+    for cat in listar_categorias_tarifa(http):
+        if int(cat["categoria_id"]) == int(categoria_id):
+            return bool(cat.get("exibir_app"))
+    raise RuntimeError(f"Categoria {categoria_id} não encontrada em /categoria/tarifa.")
+
+
+def _validar_exibir_persistido(
+    http: requests.Session,
+    categoria_id: int,
+    nome: str,
+    esperado: bool,
+) -> None:
+    _, html = carregar_form_categoria(http, categoria_id)
+    no_form = _valor_exibir_app(html)
+    if no_form != esperado:
+        raise RuntimeError(
+            f"Exibição no app não persistiu no formulário para '{nome}': "
+            f"esperado {esperado}, lido {no_form}."
+        )
 
 
 def _valor_exibir_app(html: str) -> bool:
@@ -325,30 +363,43 @@ def _permutar_ordens(
     return mudancas
 
 
+def _aplicar_exibir_no_form(
+    fields: Dict[str, List[str]], exibir: bool
+) -> None:
+    _set_field(fields, FIELD_EXIBIR, "1" if exibir else "0")
+
+
 def definir_ordem_por_nome(
     http: requests.Session,
     nome: str,
     posicao: int,
     *,
+    exibir: Optional[bool] = None,
     chave_secreta: Optional[str] = None,
     gerar_codigo_fn: Optional[Any] = None,
 ) -> Dict[str, Any]:
     categorias = listar_categorias_tarifa(http)
     mudancas = _permutar_ordens(categorias, nome, posicao)
     alvo = resolver_categoria_por_nome(nome, categorias)
-    if not mudancas:
+    alvo_id = int(alvo["categoria_id"])
+    aplicadas: List[Dict[str, Any]] = []
+
+    if not mudancas and exibir is None:
         return {
-            "categoria_id": alvo["categoria_id"],
+            "categoria_id": alvo_id,
             "nome": alvo["nome"],
             "ordem": int(alvo["ordem"]),
             "alteradas": 0,
         }
 
-    aplicadas: List[Dict[str, Any]] = []
+    alvo_no_lote = any(cid == alvo_id for cid, _ in mudancas)
+
     for cid, nova_ordem in mudancas:
         fields, html = carregar_form_categoria(http, cid)
         antes = (fields.get(FIELD_ORDEM) or [""])[0]
         _set_field(fields, FIELD_ORDEM, str(nova_ordem))
+        if exibir is not None and cid == alvo_id:
+            _aplicar_exibir_no_form(fields, exibir)
         salvar_form_categoria(
             http,
             cid,
@@ -361,19 +412,38 @@ def definir_ordem_por_nome(
             {"categoria_id": cid, "ordem_anterior": antes, "ordem_aplicada": nova_ordem}
         )
 
+    if exibir is not None and not alvo_no_lote:
+        fields, html = carregar_form_categoria(http, alvo_id)
+        _aplicar_exibir_no_form(fields, exibir)
+        salvar_form_categoria(
+            http,
+            alvo_id,
+            fields,
+            html,
+            chave_secreta=chave_secreta,
+            gerar_codigo_fn=gerar_codigo_fn,
+        )
+        aplicadas.append({"categoria_id": alvo_id, "exibir_aplicado": exibir})
+
     depois = listar_categorias_tarifa(http)
     cat = resolver_categoria_por_nome(nome, depois)
     if int(cat["ordem"]) != posicao:
         raise RuntimeError(
             f"Ordem não persistiu para '{nome}': esperado {posicao}, lido {cat['ordem']}."
         )
-    return {
+    if exibir is not None:
+        _validar_exibir_persistido(http, alvo_id, nome, exibir)
+
+    out: Dict[str, Any] = {
         "categoria_id": cat["categoria_id"],
         "nome": cat["nome"],
         "ordem": int(cat["ordem"]),
         "alteradas": len(aplicadas),
         "detalhes": aplicadas,
     }
+    if exibir is not None:
+        out["exibir_app"] = exibir
+    return out
 
 
 def definir_exibicao_app_por_nome(
@@ -400,15 +470,10 @@ def definir_exibicao_app_por_nome(
         gerar_codigo_fn=gerar_codigo_fn,
     )
 
-    _, html2 = carregar_form_categoria(http, cid)
-    depois = _valor_exibir_app(html2)
-    if depois != exibir:
-        raise RuntimeError(
-            f"Exibição no app não persistiu para '{nome}': esperado {exibir}, lido {depois}."
-        )
+    _validar_exibir_persistido(http, cid, cat["nome"], exibir)
     return {
         "categoria_id": cid,
         "nome": cat["nome"],
-        "exibir_app": depois,
+        "exibir_app": exibir,
         "valor_anterior": antes,
     }

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Machine VPS — Categorias de tarifa (Swagger)</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui.css"
+    />
+    <style>
+      html {
+        box-sizing: border-box;
+        overflow-y: scroll;
+      }
+      *,
+      *:before,
+      *:after {
+        box-sizing: inherit;
+      }
+      body {
+        margin: 0;
+        background: #fafafa;
+      }
+      .topbar {
+        background: #1a1a2e;
+        color: #eee;
+        padding: 12px 20px;
+        font-family: system-ui, sans-serif;
+        font-size: 14px;
+      }
+      .topbar strong {
+        color: #fff;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <strong>Machine VPS API</strong> — Categorias de tarifa ·
+      Autorize com <code>X-API-Key</code> (botão <em>Authorize</em>) ·
+      Sessão do painel em <code>X-Session-Token</code> (parâmetro de header em cada rota)
+    </div>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-bundle.js"></script>
+    <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-standalone-preset.js"></script>
+    <script>
+      window.onload = function () {
+        window.ui = SwaggerUIBundle({
+          url: "./openapi.yaml",
+          dom_id: "#swagger-ui",
+          deepLinking: true,
+          presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+          layout: "StandaloneLayout",
+          persistAuthorization: true,
+          tryItOutEnabled: true,
+          validatorUrl: null,
+        });
+      };
+    </script>
+  </body>
+</html>
