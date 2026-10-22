@@ -272,7 +272,11 @@ paths:
         - A gravação envia o formulário como o navegador (campos desabilitados não são enviados) e
           **só `Taxista[taxista_apoio]` muda**. Depois relê todos os campos e devolve o diff em
           `alteracoes`; qualquer outro campo alterado aparece em `alteracoes_inesperadas` (deve vir vazio).
-        - Motoristas **deletados** (status `D`) não gravam no painel — filtre-os na listagem.
+        - O painel só **persiste** a relação de motoristas **ativos** (status `A`). Em motorista em análise, deletado
+          e outros status o painel aceita o envio mas o valor não muda, e a rota responde `409 painel_nao_gravou`.
+          Use `status=A` na listagem. Confirmado em Mariana: motorista ativo grava; em análise não.
+        - O painel também valida o cadastro inteiro ao salvar e recusa dado antigo inválido
+          (ex.: "Telefone é inválido", "Número Banco é inválido"): a rota devolve `422 validacao_painel` com a mensagem.
       operationId: taxistaRelacaoPatch
       parameters:
         - name: taxista_id
@@ -572,6 +576,9 @@ components:
           type: string
         dry_run:
           type: boolean
+        telefone_variante:
+          type: string
+          description: Como o telefone foi enviado ao painel (navegador | parenteses_completo | parenteses). Só na gravação.
         inalterado:
           type: boolean
           description: true quando o motorista já estava no valor pedido (nada foi gravado)
