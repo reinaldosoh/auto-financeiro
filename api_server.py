@@ -129,7 +129,7 @@ from machine_dashboard_http import (
     obter_posicao_corrida,
 )
 from machine_passageiro_http import obter_ficha_passageiro
-from machine_taxista_http import atualizar_relacao_taxista
+from machine_taxista_http import atualizar_relacao_taxista, classificar_erro, listar_taxistas
 from machine_categoria_http import (
     definir_exibicao_app_por_nome,
     definir_ordem_por_nome,
@@ -422,6 +422,8 @@ class TaxistaPrioridadeInput(CidadePainelInput):
     """Mesmo contrato de `/relatorio/motoristas/solicitar`."""
 
     taxista_id: int
+    # Lê o formulário e devolve o que seria alterado, sem gravar nem pedir 2FA.
+    dry_run: bool = False
 
 
 class CategoriaOrdemInput(CidadePainelInput):
@@ -1033,6 +1035,15 @@ def _notificacao_http_erro(exc: Exception) -> HTTPException:
     return HTTPException(
         status_code=400,
         detail={"sucesso": False, "mensagem": str(exc)},
+    )
+
+
+def _taxista_http_erro(exc: Exception) -> HTTPException:
+    """Erro das rotas de taxista com `codigo` estável e status HTTP específico."""
+    codigo, status = classificar_erro(exc)
+    return HTTPException(
+        status_code=status,
+        detail={"sucesso": False, "codigo": codigo, "mensagem": str(exc)},
     )
 
 
@@ -1724,13 +1735,55 @@ async def _taxista_alterar_relacao(
             relacao,
             chave_secreta=chave,
             gerar_codigo_fn=gerar_codigo,
+            dry_run=inp.dry_run,
         )
         return {"sucesso": True, **resultado}
     except HTTPException:
         raise
     except Exception as e:
         log.warning("Falha %s taxista_id=%s: %s", rota_log, inp.taxista_id, e)
-        raise _notificacao_http_erro(e)
+        raise _taxista_http_erro(e)
+
+
+@app.get("/taxista/listar")
+async def taxista_listar(
+    session_token: SessionTokenDep,
+    relacao: Literal["prioritario", "secundario", "todos"] = "todos",
+    status: str = "A",
+    pagina: int = 1,
+    todas: bool = False,
+):
+    """
+    Lista motoristas da cidade pela Relação do painel (prioritário/secundário).
+
+    `status`: letras do painel separadas por vírgula (A ativo, I inativo, S suspenso,
+    G, R rejeitado, D deletado, E em análise, F fila). Padrão: A.
+    A grade tem 10 por página; `todas=true` percorre todas (pode levar minutos em praças grandes).
+    """
+    log.info(
+        "GET /taxista/listar relacao=%s status=%s pagina=%s todas=%s session=%s",
+        relacao,
+        status,
+        pagina,
+        todas,
+        token_log_prefix(session_token),
+    )
+    try:
+        http = _require_session(header_token=session_token)
+        resultado = await _executor_heavy(
+            listar_taxistas,
+            http,
+            relacao=relacao,
+            status=[s for s in status.split(",") if s.strip()],
+            pagina=pagina,
+            todas=todas,
+        )
+        return {"sucesso": True, **resultado}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("Falha GET /taxista/listar: %s", e)
+        raise _taxista_http_erro(e)
 
 
 @app.post("/taxista/prioridade/ativar")

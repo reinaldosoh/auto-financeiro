@@ -38,8 +38,42 @@ _NAME_HINTS = (
 )
 
 
+class PainelErro(RuntimeError):
+    """Erro do painel com código estável e status HTTP sugerido para a API."""
+
+    def __init__(self, codigo: str, mensagem: str, status: int = 400):
+        super().__init__(mensagem)
+        self.codigo = codigo
+        self.status = status
+
+
+# Atributos de uma tag, respeitando aspas (um ">" dentro de value="..." não fecha a tag).
+_ATTRS = r"(?:[^>\"']|\"[^\"]*\"|'[^']*')*"
+
+
+def _attr(attrs: str, name: str) -> Optional[str]:
+    """Valor decodificado do atributo (aspas duplas, simples ou sem aspas); None se ausente."""
+    m = re.search(
+        r"(?:^|[\s\"'])" + re.escape(name) + r"\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
+        attrs,
+        re.I,
+    )
+    if not m:
+        return None
+    return unescape(next(g for g in m.groups() if g is not None))
+
+
+def _flag(attrs: str, name: str) -> bool:
+    """Atributo booleano (disabled, checked, selected...) fora de valores entre aspas."""
+    sem_valores = re.sub(r"\"[^\"]*\"|'[^']*'", '""', attrs)
+    return re.search(r"(?:^|[\s\"'])" + name + r"(?=[\s/=>]|$)", sem_valores, re.I) is not None
+
+
 class _TaxistaFormParser:
-    """Extrai campos do formulário de edição do taxista (regex; ignora script)."""
+    """Extrai campos do formulário de edição do taxista como o navegador enviaria.
+
+    Campos `disabled` não são enviados (igual ao navegador); valores HTML são decodificados.
+    """
 
     @staticmethod
     def _form_html(html: str) -> str:
@@ -66,51 +100,77 @@ class _TaxistaFormParser:
         return re.sub(r"<script[\s\S]*?</script>", "", form, flags=re.I)
 
     @classmethod
-    def parse(cls, html: str) -> Dict[str, List[str]]:
+    def parse(
+        cls, html: str, ignorados: Optional[List[str]] = None
+    ) -> Dict[str, List[str]]:
+        """`ignorados` (opcional) recebe os nomes dos campos desabilitados que não são enviados."""
         form = cls._form_html(html)
         fields: Dict[str, List[str]] = defaultdict(list)
 
-        for tag in re.findall(r"<input[^>]+>", form, flags=re.I):
-            name_m = re.search(r'name="([^"]+)"', tag)
-            if not name_m:
+        def _ignora(nome: str) -> None:
+            if ignorados is not None and nome not in ignorados:
+                ignorados.append(nome)
+
+        for im in re.finditer(r"<input\b(" + _ATTRS + r")>", form, flags=re.I):
+            attrs = im.group(1)
+            name = _attr(attrs, "name")
+            if not name:
                 continue
-            name = name_m.group(1)
-            typ_m = re.search(r'type="([^"]+)"', tag, re.I)
-            typ = (typ_m.group(1) if typ_m else "text").lower()
-            if typ in ("submit", "button", "file", "image"):
+            typ = (_attr(attrs, "type") or "text").lower()
+            if typ in ("submit", "button", "file", "image", "reset"):
                 continue
-            val_m = re.search(r'value="([^"]*)"', tag)
-            val = val_m.group(1) if val_m else ""
-            checked = "checked" in tag.lower()
+            if _flag(attrs, "disabled"):
+                _ignora(name)
+                continue
+            val = _attr(attrs, "value")
             if typ in ("checkbox", "radio"):
-                if checked:
-                    fields[name].append(val if val or typ == "radio" else "on")
+                if _flag(attrs, "checked"):
+                    fields[name].append("on" if val is None else val)
             else:
-                fields[name].append(val)
+                fields[name].append(val or "")
 
         for sm in re.finditer(
-            r'<select[^>]+name="([^"]+)"[^>]*>(.*?)</select>', form, re.S | re.I
+            r"<select\b(" + _ATTRS + r")>(.*?)</select>", form, re.S | re.I
         ):
-            name = sm.group(1)
-            chosen: Optional[str] = None
-            for om in re.finditer(r"<option([^>]*)>", sm.group(2), re.I):
-                attrs = om.group(1)
-                if "selected" not in attrs.lower():
+            attrs = sm.group(1)
+            name = _attr(attrs, "name")
+            if not name:
+                continue
+            if _flag(attrs, "disabled"):
+                _ignora(name)
+                continue
+            opcoes: List[Tuple[str, bool]] = []
+            for om in re.finditer(r"<option\b(" + _ATTRS + r")>([^<]*)", sm.group(2), re.I):
+                if _flag(om.group(1), "disabled"):
                     continue
-                val_m = re.search(r'value="([^"]*)"', attrs, re.I)
-                chosen = val_m.group(1) if val_m else ""
-                break
-            if chosen is not None:
-                fields[name].append(chosen)
+                val = _attr(om.group(1), "value")
+                if val is None:
+                    val = unescape(om.group(2)).strip()
+                opcoes.append((val, _flag(om.group(1), "selected")))
+            if _flag(attrs, "multiple"):
+                fields_sel = [v for v, sel in opcoes if sel]
             else:
-                first = re.search(r'<option[^>]*value="([^"]*)"', sm.group(2), re.I)
-                if first:
-                    fields[name].append(first.group(1))
+                marcados = [v for v, sel in opcoes if sel]
+                if marcados:
+                    fields_sel = [marcados[-1]]
+                else:
+                    fields_sel = [opcoes[0][0]] if opcoes else []
+            for v in fields_sel:
+                fields[name].append(v)
 
         for tm in re.finditer(
-            r'<textarea[^>]+name="([^"]+)"[^>]*>(.*?)</textarea>', form, re.S | re.I
+            r"<textarea\b(" + _ATTRS + r")>(.*?)</textarea>", form, re.S | re.I
         ):
-            fields[tm.group(1)].append(tm.group(2))
+            name = _attr(tm.group(1), "name")
+            if not name:
+                continue
+            if _flag(tm.group(1), "disabled"):
+                _ignora(name)
+                continue
+            conteudo = unescape(tm.group(2))
+            if conteudo.startswith("\n"):
+                conteudo = conteudo[1:]
+            fields[name].append(conteudo)
 
         return dict(fields)
 
@@ -119,17 +179,25 @@ class _TaxistaFormParser:
         form = cls._form_html(html)
         out: List[Dict[str, Any]] = []
         for sm in re.finditer(
-            r'<select[^>]+name="([^"]+)"[^>]*>(.*?)</select>', form, re.S | re.I
+            r"<select\b(" + _ATTRS + r")>(.*?)</select>", form, re.S | re.I
         ):
-            name = sm.group(1)
-            options: List[Dict[str, str]] = []
-            for om in re.finditer(r"<option([^>]*)>(.*?)</option>", sm.group(2), re.S | re.I):
-                val_m = re.search(r'value="([^"]*)"', om.group(1))
-                val = val_m.group(1) if val_m else unescape(om.group(2)).strip()
-                text = re.sub(r"<[^>]+>", "", om.group(2))
-                text = unescape(text).strip()
-                options.append({"value": val, "text": text, "selected": "selected" in om.group(1).lower()})
-            out.append({"name": name, "options": options})
+            name = _attr(sm.group(1), "name")
+            if not name:
+                continue
+            options: List[Dict[str, Any]] = []
+            for om in re.finditer(
+                r"<option\b(" + _ATTRS + r")>(.*?)</option>", sm.group(2), re.S | re.I
+            ):
+                text = unescape(re.sub(r"<[^>]+>", "", om.group(2))).strip()
+                val = _attr(om.group(1), "value")
+                if val is None:
+                    val = text
+                options.append(
+                    {"value": val, "text": text, "selected": _flag(om.group(1), "selected")}
+                )
+            out.append(
+                {"name": name, "options": options, "disabled": _flag(sm.group(1), "disabled")}
+            )
         return out
 
 
@@ -270,26 +338,11 @@ def _normalizar_telefone_taxista(valor: str) -> str:
     return (valor or "").strip()
 
 
-def _ajustar_vinculo_relacao(
-    fields: Dict[str, List[str]], field_relacao: str, relacao: RelacaoTaxista
-) -> None:
-    if field_relacao != "Taxista[taxista_apoio]":
-        return
-    if relacao == "secundario":
-        _set_field(fields, "Taxista[vinculo]", "")
-    elif relacao == "prioritario" and not (fields.get("Taxista[vinculo]") or [""])[0]:
-        _set_field(fields, "Taxista[vinculo]", "T")
+def _preparar_campos_taxista_post(fields: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    """Posta o formulário como o navegador enviaria: só o campo-alvo muda.
 
-
-def _preparar_campos_taxista_post(
-    fields: Dict[str, List[str]],
-    field_relacao: str,
-    relacao: RelacaoTaxista,
-) -> Dict[str, List[str]]:
-    if "Taxista[telefone]" in fields and fields["Taxista[telefone]"]:
-        tel = _normalizar_telefone_taxista(fields["Taxista[telefone]"][0])
-        _set_field(fields, "Taxista[telefone]", tel)
-    _ajustar_vinculo_relacao(fields, field_relacao, relacao)
+    Não reescreve telefone nem vínculo (o painel desabilita o vínculo e normaliza o telefone).
+    """
     return _limpar_campos_para_post(fields)
 
 
@@ -349,18 +402,91 @@ def _valor_campo_no_html(html: str, field_name: str) -> str:
     return vals[0] if vals else ""
 
 
+# Campos que o painel recalcula a cada leitura (não são alteração do cadastro).
+_CAMPOS_RUIDO = {
+    "data_status_taxista",
+    "logado",
+    "situacao",
+    "tempo_de_impedimento",
+    "motivo_impedimento",
+    "ultima_corrida",
+    "ultima_atividade",
+}
+
+
+def _campo_ruido(nome: str) -> bool:
+    return nome in _CAMPOS_RUIDO or "csrf" in nome.lower()
+
+
+def diff_formularios(
+    antes: Dict[str, List[str]], depois: Dict[str, List[str]]
+) -> List[Dict[str, Any]]:
+    """Campos cujo valor mudou entre dois estados do formulário (ignora campos de ruído)."""
+    out: List[Dict[str, Any]] = []
+    for nome in sorted(set(antes) | set(depois)):
+        if _campo_ruido(nome) or "[__INDEX__]" in nome:
+            continue
+        va, vd = antes.get(nome, []), depois.get(nome, [])
+        if va != vd:
+            out.append({"campo": nome, "antes": va, "depois": vd})
+    return out
+
+
+def classificar_erro(exc: BaseException) -> Tuple[str, int]:
+    """(codigo, status HTTP) estáveis para o cliente distinguir a falha."""
+    if isinstance(exc, PainelErro):
+        return exc.codigo, exc.status
+    if isinstance(exc, requests.RequestException):
+        return "painel_indisponivel", 502
+    msg = _norm_label(str(exc))
+    if "saldo minimo" in msg:
+        return "saldo_minimo", 422
+    if "bandeira" in msg and "desativada" in msg:
+        return "bandeira_desativada", 403
+    if "2fa" in msg and ("segredo" in msg or "chave" in msg):
+        return "2fa_sem_segredo", 409
+    if "bloqueado" in msg:
+        return "usuario_bloqueado", 403
+    if "sessao expirada" in msg or "faca login" in msg:
+        return "sessao_expirada", 401
+    if "http 403" in msg or "sem permissao" in msg:
+        return "sem_permissao", 403
+    return "erro_painel", 400
+
+
 def carregar_form_taxista(http: requests.Session, taxista_id: int) -> Tuple[Dict[str, List[str]], str]:
     url = f"{BASE_URL}/taxista/update/{int(taxista_id)}"
     r = http.get(url, timeout=120)
     if r.status_code == 403:
-        raise RuntimeError("HTTP 403 em /taxista/update — conta sem permissão.")
+        raise PainelErro("sem_permissao", "HTTP 403 em /taxista/update — conta sem permissão.", 403)
     text = r.text or ""
     if "LoginForm" in text and "Taxista[" not in text:
-        raise RuntimeError("Sessão expirada — faça login novamente.")
+        raise PainelErro("sessao_expirada", "Sessão expirada — faça login novamente.", 401)
     if "Taxista[" not in text:
-        raise RuntimeError(f"Página do taxista {taxista_id} não encontrada ou sem formulário.")
+        raise PainelErro(
+            "taxista_nao_encontrado",
+            f"Página do taxista {taxista_id} não encontrada ou sem formulário.",
+            404,
+        )
     fields = _TaxistaFormParser.parse(text)
     return fields, text
+
+
+def _select_desabilitado(html: str, field_name: str) -> bool:
+    return any(
+        sel["name"] == field_name and sel.get("disabled")
+        for sel in _TaxistaFormParser.list_selects(html)
+    )
+
+
+def _erros_do_painel(text: str) -> List[str]:
+    erros = re.findall(r'class="errorMessage[^"]*"[^>]*>([^<]+)', text)
+    erros += re.findall(r'class="help-block error"[^>]*>([^<]+)', text)
+    if "errorSummary" in text:
+        m = re.search(r'class="errorSummary[^"]*"[^>]*>[\s\S]*?<ul>([\s\S]*?)</ul>', text, re.I)
+        if m:
+            erros += re.findall(r"<li[^>]*>([^<]+)", m.group(1))
+    return [e.strip() for e in erros if e.strip()]
 
 
 def atualizar_relacao_taxista(
@@ -370,18 +496,56 @@ def atualizar_relacao_taxista(
     *,
     chave_secreta: Optional[str] = None,
     gerar_codigo_fn: Optional[Any] = None,
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
-    fields, html = carregar_form_taxista(http, taxista_id)
+    """Altera só `taxista_apoio`; devolve o diff completo antes/depois.
+
+    - Já no valor pedido: não posta (`inalterado`).
+    - `dry_run`: lê e monta o POST, sem gravar nem pedir 2FA.
+    - `alteracoes_inesperadas`: campos que mudaram além do alvo (deve vir vazio).
+    """
+    ignorados: List[str] = []
+    html = carregar_form_taxista(http, taxista_id)[1]
+    fields = _TaxistaFormParser.parse(html, ignorados)
     field_name, value_map = descobrir_campo_relacao(html)
     if relacao not in value_map:
         raise RuntimeError(f"Valor de relação '{relacao}' não mapeado para o campo {field_name}.")
+    if _select_desabilitado(html, field_name):
+        raise PainelErro(
+            "campo_desabilitado",
+            f"O campo {field_name} está desabilitado para esta conta ou motorista.",
+            403,
+        )
     antes = (fields.get(field_name) or [""])[0]
     novo = value_map[relacao]
-    _set_field(fields, field_name, novo)
-    fields = _preparar_campos_taxista_post(fields, field_name, relacao)
+    base = {
+        "taxista_id": int(taxista_id),
+        "relacao": relacao,
+        "campo": field_name,
+        "valor_anterior": antes,
+        "valor_aplicado": novo,
+        "dry_run": dry_run,
+    }
+
+    if antes == novo:
+        return {**base, "inalterado": True, "alteracoes": [], "alteracoes_inesperadas": []}
+
+    a_postar = {k: list(v) for k, v in fields.items()}
+    _set_field(a_postar, field_name, novo)
+    a_postar = _preparar_campos_taxista_post(a_postar)
+    previstas = diff_formularios(fields, a_postar)
+
+    if dry_run:
+        return {
+            **base,
+            "inalterado": False,
+            "alteracoes_previstas": previstas,
+            "campos_enviados": sum(len(v) for v in a_postar.values()),
+            "campos_desabilitados_nao_enviados": sorted(ignorados),
+        }
 
     url = f"{BASE_URL}/taxista/update/{int(taxista_id)}"
-    pairs = _pairs_from_fields(fields, html)
+    pairs = _pairs_from_fields(a_postar, html)
     headers = {
         "Referer": url,
         "Content-Type": "application/x-www-form-urlencoded",
@@ -398,25 +562,33 @@ def atualizar_relacao_taxista(
 
     text = r.text or ""
     if "LoginForm" in text and "Taxista[" not in text:
-        raise RuntimeError("Sessão expirada ao gravar taxista.")
+        raise PainelErro("sessao_expirada", "Sessão expirada ao gravar taxista.", 401)
 
-    erros = re.findall(r'class="errorMessage[^"]*"[^>]*>([^<]+)', text)
-    erros += re.findall(r'class="help-block error"[^>]*>([^<]+)', text)
+    erros = _erros_do_painel(text)
     if erros:
-        raise RuntimeError("; ".join(e.strip() for e in erros if e.strip()))
+        msg = "; ".join(erros)
+        codigo, status = classificar_erro(RuntimeError(msg))
+        if codigo == "erro_painel":
+            codigo, status = "validacao_painel", 422
+        raise PainelErro(codigo, msg, status)
 
-    if "errorSummary" in text:
-        m = re.search(r'class="errorSummary[^"]*"[^>]*>[\s\S]*?<ul>([\s\S]*?)</ul>', text, re.I)
-        if m:
-            msgs = re.findall(r"<li[^>]*>([^<]+)", m.group(1))
-            if msgs:
-                raise RuntimeError("; ".join(s.strip() for s in msgs if s.strip()))
-
-    _, html_depois = carregar_form_taxista(http, taxista_id)
+    fields_depois, html_depois = carregar_form_taxista(http, taxista_id)
     gravado = _valor_campo_no_html(html_depois, field_name)
     if gravado != novo:
-        raise RuntimeError(
-            f"Painel não gravou {field_name}: esperado value={novo!r}, lido={gravado!r} após POST."
+        raise PainelErro(
+            "painel_nao_gravou",
+            f"Painel não gravou {field_name}: esperado value={novo!r}, lido={gravado!r} após POST.",
+            409,
+        )
+
+    alteracoes = diff_formularios(fields, fields_depois)
+    inesperadas = [a for a in alteracoes if a["campo"] != field_name]
+    if inesperadas:
+        log.warning(
+            "taxista %s: campos alterados além de %s: %s",
+            taxista_id,
+            field_name,
+            [a["campo"] for a in inesperadas],
         )
 
     log.info(
@@ -428,9 +600,133 @@ def atualizar_relacao_taxista(
         novo,
     )
     return {
-        "taxista_id": int(taxista_id),
+        **base,
+        "inalterado": False,
+        "alteracoes": alteracoes,
+        "alteracoes_inesperadas": inesperadas,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Listagem de motoristas por relação (GET da grade /taxista/index)
+# ---------------------------------------------------------------------------
+
+STATUS_TAXISTA_TODOS = ("A", "I", "S", "G", "R", "D", "E", "F")
+RELACAO_FILTRO = {"prioritario": "0", "secundario": "1", "todos": ""}
+_STATUS_PADRAO = ("A",)
+MAX_PAGINAS_LISTAGEM = 400
+
+
+def _celula(row: str, classe: str) -> str:
+    m = re.search(r'class="' + classe + r'"[^>]*>(.*?)</td>', row, re.S | re.I)
+    if not m:
+        return ""
+    texto = re.sub(r"<br\s*/?>", "|", m.group(1), flags=re.I)
+    texto = re.sub(r"<[^>]+>", "", texto)
+    return re.sub(r"\s+", " ", unescape(texto)).strip()
+
+
+def parse_grade_taxistas(html: str) -> Dict[str, Any]:
+    """Linhas e total da grade /taxista/index (Yii)."""
+    total = 0
+    m = re.search(r"de\s+([\d.]+)\s+resultado", html)
+    if m:
+        total = int(m.group(1).replace(".", ""))
+    itens: List[Dict[str, Any]] = []
+    for rm in re.finditer(r'<tr class="(?:odd|even)">(.*?)</tr>', html, re.S | re.I):
+        row = rm.group(1)
+        im = re.search(r"<input\b(" + _ATTRS + r'name="alteracao-massiva-taxista-id\[\]"' + _ATTRS + r")>", row)
+        taxista_id = _attr(im.group(1), "value") if im else None
+        if not taxista_id or not taxista_id.isdigit():
+            continue
+        cats = [c.strip() for c in _celula(row, "col-categoria").split("|") if c.strip()]
+        itens.append(
+            {
+                "taxista_id": int(taxista_id),
+                "nome": _celula(row, "col-nome"),
+                "status": _celula(row, "col-status"),
+                "categorias": cats,
+            }
+        )
+    return {"total": total, "itens": itens}
+
+
+def listar_taxistas(
+    http: requests.Session,
+    *,
+    relacao: str = "todos",
+    status: Optional[List[str]] = None,
+    pagina: int = 1,
+    todas: bool = False,
+) -> Dict[str, Any]:
+    """Lista motoristas filtrando por Relação (prioritário/secundário) e status.
+
+    Só leitura. A grade tem 10 por página; `todas=True` percorre todas as páginas.
+    O status é sempre enviado (sem ele o painel usa um filtro salvo na sessão).
+    """
+    if relacao not in RELACAO_FILTRO:
+        raise PainelErro("parametro_invalido", f"relacao deve ser uma de {sorted(RELACAO_FILTRO)}.", 422)
+    sts = [s.strip().upper() for s in (status or _STATUS_PADRAO) if s.strip()]
+    if not sts or any(s not in STATUS_TAXISTA_TODOS for s in sts):
+        raise PainelErro(
+            "parametro_invalido", f"status deve usar as letras {list(STATUS_TAXISTA_TODOS)}.", 422
+        )
+    if pagina < 1:
+        raise PainelErro("parametro_invalido", "pagina deve ser >= 1.", 422)
+
+    r = http.get(
+        BASE_URL + "/taxista/index",
+        headers={"Referer": BASE_URL + "/", "Accept": "text/html,application/xhtml+xml"},
+        timeout=60,
+    )
+    if r.status_code == 403:
+        raise PainelErro("sem_permissao", "HTTP 403 em /taxista/index — conta sem permissão.", 403)
+    texto = r.text or ""
+    if "taxista-form" not in texto:
+        if "LoginForm" in texto or "site/login" in (getattr(r, "url", "") or ""):
+            raise PainelErro("sessao_expirada", "Sessão expirada — faça login novamente.", 401)
+        raise PainelErro("erro_painel", "Formulário de filtros de /taxista/index não encontrado.", 400)
+
+    campos = _TaxistaFormParser.parse(texto)
+    campos["TaxistaSearch[taxista_apoio]"] = [RELACAO_FILTRO[relacao]]
+    campos["TaxistaSearch[status_taxista][]"] = sts
+    pairs = [(k, v) for k, vals in campos.items() for v in vals]
+    headers = {
+        "Referer": BASE_URL + "/taxista/index",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    def _pagina(n: int) -> Dict[str, Any]:
+        url = BASE_URL + "/taxista/index" + (f"?TaxistaSearch_page={n}" if n > 1 else "")
+        resp = http.post(url, data=pairs, headers=headers, timeout=90)
+        t = resp.text or ""
+        if "LoginForm" in t and "taxista-form" not in t:
+            raise PainelErro("sessao_expirada", "Sessão expirada — faça login novamente.", 401)
+        return parse_grade_taxistas(t)
+
+    primeira = _pagina(1 if todas else pagina)
+    total = primeira["total"]
+    por_pagina = 10
+    paginas = max(1, -(-total // por_pagina)) if total else 1
+    itens = list(primeira["itens"])
+    atual = 1 if todas else pagina
+    if todas:
+        if paginas > MAX_PAGINAS_LISTAGEM:
+            raise PainelErro(
+                "lista_grande_demais",
+                f"{total} motoristas ({paginas} páginas): use `pagina` ou o export assíncrono.",
+                422,
+            )
+        for n in range(2, paginas + 1):
+            itens.extend(_pagina(n)["itens"])
+    return {
         "relacao": relacao,
-        "campo": field_name,
-        "valor_anterior": antes,
-        "valor_aplicado": novo,
+        "status": sts,
+        "total": total,
+        "pagina": atual,
+        "paginas": paginas,
+        "por_pagina": por_pagina,
+        "todas": todas,
+        "itens": itens,
+        "completo": todas and len(itens) == total,
     }

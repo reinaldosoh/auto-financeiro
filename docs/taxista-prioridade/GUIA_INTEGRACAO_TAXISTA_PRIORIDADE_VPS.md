@@ -46,12 +46,55 @@ curl -sS -X POST "$BASE_URL/taxista/prioridade/remover" \
   -d '{"taxista_id":772770}'
 ```
 
-Resposta de sucesso inclui `relacao`, `campo`, `valor_anterior`, `valor_aplicado`.
+## Listar motoristas por relação
 
-## Erros comuns
+`GET /taxista/listar` (headers `X-API-Key` e `X-Session-Token`) — só leitura, lê a grade do painel.
 
-- **401** — API key errada ou `session_token` no body em vez do header.
-- **400** — telefone inválido no cadastro, taxista inexistente, ou painel rejeitou o POST.
-- **429** — muitos logins; reutilize `X-Session-Token`.
+| Parâmetro | Valores | Padrão |
+|---|---|---|
+| `relacao` | `prioritario`, `secundario`, `todos` | `todos` |
+| `status` | letras do painel separadas por vírgula: A ativo, I inativo, S suspenso, G, R rejeitado, D deletado, E em análise, F fila | `A` |
+| `pagina` | 1.. (a grade tem 10 por página) | 1 |
+| `todas` | `true` percorre todas as páginas (lento em praças grandes; limite de 400 páginas) | `false` |
+
+```bash
+curl -sS "$BASE_URL/taxista/listar?relacao=secundario&status=A&todas=true" \
+  -H "X-API-Key: $API_KEY" -H "X-Session-Token: $TOKEN"
+```
+
+Resposta: `total`, `pagina`, `paginas`, `itens` (`taxista_id`, `nome`, `status`, `categorias`) e `completo`.
+O status é sempre enviado ao painel; sem ele o painel usa um filtro salvo na sessão e o total muda.
+
+## Corpo opcional
+
+- `"dry_run": true` — lê o formulário e devolve `alteracoes_previstas`, sem gravar e sem pedir 2FA.
+
+## Resposta
+
+- `inalterado: true` — o motorista já estava no valor pedido; nada foi gravado.
+- `alteracoes` — diff completo (todos os campos) entre o formulário antes e depois da gravação.
+- `alteracoes_inesperadas` — campos alterados além de `Taxista[taxista_apoio]`. Deve vir vazio; se não vier, avise.
+- No `dry_run`: `alteracoes_previstas`, `campos_enviados` e `campos_desabilitados_nao_enviados`.
+- Semântica de `Taxista[taxista_apoio]`: `0` = prioritário, `1` = secundário.
+- A gravação posta o formulário como o navegador: campos desabilitados não são enviados e telefone/vínculo não são alterados.
+
+## Erros
+
+Corpo: `{"sucesso": false, "codigo": "...", "mensagem": "..."}`.
+
+| codigo | HTTP | Significado |
+|---|---|---|
+| `sessao_expirada` | 401 | Faça login de novo |
+| `sem_permissao` | 403 | Conta sem permissão de editar motorista |
+| `campo_desabilitado` | 403 | Campo de relação desabilitado para esta conta/motorista |
+| `bandeira_desativada` | 403 | Bandeira da praça desativada |
+| `usuario_bloqueado` | 403 | Usuário bloqueado no painel |
+| `taxista_nao_encontrado` | 404 | Motorista inexistente |
+| `painel_nao_gravou` | 409 | O painel respondeu, mas o valor não persistiu |
+| `2fa_sem_segredo` | 409 | Falta o segredo 2FA da praça no cofre (`POST /autenticar`) |
+| `saldo_minimo` | 422 | O painel recusou o bloco de saldo mínimo |
+| `validacao_painel` | 422 | Outra validação do painel |
+| `painel_indisponivel` | 502 | Falha de rede com o painel |
+| `erro_painel` | 400 | Outro erro |
 
 Timeout recomendado: **180 s** (2FA de ação).
