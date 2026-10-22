@@ -10,15 +10,35 @@ info:
     - **prioritário** → valor mapeado pelo painel (ex.: `0`)
     - **secundário** → valor mapeado (ex.: `1`)
 
+    Confirmado no painel: `0` = **Motorista prioritário** (padrão de quase todos os cadastros) e
+    `1` = **Motorista secundário**. Marcar um motorista como prioritário só tem efeito prático se
+    os demais da praça estiverem como secundário.
+
+    **Alterar a relação de todos (laço no cliente)** — a VPS não tem serviço de laço. O sistema que
+    chama lista os motoristas com `GET /taxista/listar` e, para cada `taxista_id`, chama
+    `PATCH /taxista/{taxista_id}/relacao` (uma chamada por vez, reaproveitando o `X-Session-Token`).
+    A rota é idempotente: se o motorista já está no valor pedido, responde `inalterado: true` sem gravar.
+    Use `dry_run: true` para ver o que mudaria sem gravar.
+
+    **Erros** — o corpo traz `codigo` estável (ver `ErroDetail`) e o status HTTP correspondente.
+
     **Autenticação**
     1. **`X-API-Key`** — obrigatória em todas as requisições.
-    2. **Painel** — credenciais da **cidade** (e-mail, senha, TOTP) **ou** sessão via header **`X-Session-Token`**
+    2. **Painel** — credenciais da **cidade** (e-mail e senha; 2FA resolvido internamente pela VPS) **ou** sessão via header **`X-Session-Token`**
        (retornado por `POST /notificacao/login`).
 
     **Importante:** não envie `session_token` no JSON — use apenas o header `X-Session-Token`.
 
-    **2FA de ação** — gravar o taxista pode exigir TOTP; envie `chave_secreta` no body quando não houver
-    TOTP pré-configurado no servidor (`POST /autenticar`).
+    **2FA automático — integração de terceiros**
+    O terceiro informa somente o e-mail e a senha do painel Machine da mesma conta/cidade
+    conectada no Radar. O TOTP dessa conta deve estar previamente sincronizado no cofre
+    criptografado da VPS. O servidor resolve o segredo pelo e-mail e o usa internamente
+    tanto no login quanto na confirmação da alteração. O terceiro não envia `chave_secreta`
+    nem `codigo_2fa` e não precisa cadastrar ou gerar outro autenticador.
+    Se o segredo não estiver disponível, a equipe Radar deve corrigir a integração/cofre;
+    não solicitar a chave TOTP ao usuário final nem orientar repetição de cadastro 2FA.
+    A presença de uma cidade ativa no Radar, sozinha, não sincroniza automaticamente um
+    segredo ausente na VPS. Esta rota não consulta o estado ativo da cidade no Radar.
 
     **Identificador** — `taxista_id` é o ID numérico do motorista no painel (ex.: coluna ID / URL `/taxista/update/772770`).
 
@@ -33,6 +53,8 @@ tags:
   - name: Sessão
   - name: Taxista — prioridade
     description: Ativar ou remover prioridade (relação no cadastro)
+  - name: Taxista — listagem
+    description: Listar motoristas da cidade por relação e status (somente leitura)
 
 security:
   - ApiKeyAuth: []
@@ -57,8 +79,12 @@ paths:
   /notificacao/login:
     post:
       tags: [Sessão]
-      summary: Login no painel Machine
-      description: Retorna `session_token` (~30 min). Use no header `X-Session-Token` nas rotas de taxista.
+      summary: Login com e-mail e senha (2FA automático no servidor)
+      description: |
+        Enviar somente e-mail e senha do painel Machine. O servidor consulta o TOTP
+        previamente salvo para esse e-mail e faz o 2FA internamente.
+        Retorna `session_token` (~30 min), usado no header `X-Session-Token`.
+        Não informar chave secreta ou código 2FA no fluxo de terceiros.
       operationId: notificacaoLogin
       requestBody:
         required: true
@@ -66,6 +92,9 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/LoginPainelInput"
+            example:
+              email: cidade@exemplo.com
+              senha: "SENHA_DO_PAINEL"
       responses:
         "200":
           description: Login OK
@@ -73,6 +102,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LoginPainelResponse"
+        "400":
+          $ref: "#/components/responses/ErroNegocio"
         "401":
           $ref: "#/components/responses/UnauthorizedApiKey"
         "429":
@@ -100,12 +131,12 @@ paths:
                 value:
                   taxista_id: 772770
               com_credenciais:
-                summary: Login automático no body
+                summary: E-mail e senha; TOTP interno no servidor
                 value:
                   taxista_id: 772770
                   email: cidade@exemplo.com
-                  senha: "***"
-                  chave_secreta: JBSWY3DPEHPK3PXP
+                  senha: "SENHA_DO_PAINEL"
+
       responses:
         "200":
           description: Prioridade aplicada
@@ -122,6 +153,14 @@ paths:
                 valor_aplicado: "0"
         "400":
           $ref: "#/components/responses/ErroNegocio"
+        "403":
+          $ref: "#/components/responses/ErroCodigo"
+        "404":
+          $ref: "#/components/responses/ErroCodigo"
+        "409":
+          $ref: "#/components/responses/ErroCodigo"
+        "422":
+          $ref: "#/components/responses/ErroCodigo"
         "401":
           $ref: "#/components/responses/UnauthorizedSession"
         "429":
@@ -160,6 +199,14 @@ paths:
                 valor_aplicado: "1"
         "400":
           $ref: "#/components/responses/ErroNegocio"
+        "403":
+          $ref: "#/components/responses/ErroCodigo"
+        "404":
+          $ref: "#/components/responses/ErroCodigo"
+        "409":
+          $ref: "#/components/responses/ErroCodigo"
+        "422":
+          $ref: "#/components/responses/ErroCodigo"
         "401":
           $ref: "#/components/responses/UnauthorizedSession"
         "429":
@@ -193,10 +240,179 @@ paths:
                 $ref: "#/components/schemas/TaxistaRelacaoResponse"
         "400":
           $ref: "#/components/responses/ErroNegocio"
+        "403":
+          $ref: "#/components/responses/ErroCodigo"
+        "404":
+          $ref: "#/components/responses/ErroCodigo"
+        "409":
+          $ref: "#/components/responses/ErroCodigo"
+        "422":
+          $ref: "#/components/responses/ErroCodigo"
         "401":
           $ref: "#/components/responses/UnauthorizedSession"
         "429":
           $ref: "#/components/responses/RateLimit"
+
+  /taxista/{taxista_id}/relacao:
+    patch:
+      tags: ["Taxista — prioridade"]
+      summary: Alterar a relação de UM motorista (para laço no cliente)
+      description: |
+        Define `prioritario` ou `secundario` para o motorista da URL.
+
+        - **Idempotente**: se já estiver no valor pedido, responde `inalterado: true` e **não grava**.
+        - **`dry_run: true`**: lê o formulário e devolve `alteracoes_previstas`, sem gravar e sem pedir 2FA.
+        - A gravação envia o formulário como o navegador (campos desabilitados não são enviados) e
+          **só `Taxista[taxista_apoio]` muda**. Depois relê todos os campos e devolve o diff em
+          `alteracoes`; qualquer outro campo alterado aparece em `alteracoes_inesperadas` (deve vir vazio).
+        - Motoristas **deletados** (status `D`) não gravam no painel — filtre-os na listagem.
+      operationId: taxistaRelacaoPatch
+      parameters:
+        - name: taxista_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 772770
+        - $ref: "#/components/parameters/SessionTokenHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaxistaRelacaoPatchInput"
+            examples:
+              aplicar:
+                summary: Tornar secundário
+                value:
+                  relacao: secundario
+              simular:
+                summary: Só simular (não grava)
+                value:
+                  relacao: prioritario
+                  dry_run: true
+      responses:
+        "200":
+          description: Relação aplicada, já estava no valor pedido, ou simulação
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaxistaRelacaoResponse"
+              examples:
+                aplicada:
+                  value:
+                    sucesso: true
+                    taxista_id: 772770
+                    relacao: secundario
+                    campo: Taxista[taxista_apoio]
+                    valor_anterior: "0"
+                    valor_aplicado: "1"
+                    dry_run: false
+                    inalterado: false
+                    alteracoes:
+                      - campo: Taxista[taxista_apoio]
+                        antes: ["0"]
+                        depois: ["1"]
+                    alteracoes_inesperadas: []
+                ja_no_valor:
+                  value:
+                    sucesso: true
+                    taxista_id: 772770
+                    relacao: secundario
+                    campo: Taxista[taxista_apoio]
+                    valor_anterior: "1"
+                    valor_aplicado: "1"
+                    dry_run: false
+                    inalterado: true
+                    alteracoes: []
+                    alteracoes_inesperadas: []
+        "400":
+          $ref: "#/components/responses/ErroNegocio"
+        "401":
+          $ref: "#/components/responses/UnauthorizedSession"
+        "403":
+          $ref: "#/components/responses/ErroCodigo"
+        "404":
+          $ref: "#/components/responses/ErroCodigo"
+        "409":
+          $ref: "#/components/responses/ErroCodigo"
+        "422":
+          $ref: "#/components/responses/ErroCodigo"
+        "429":
+          $ref: "#/components/responses/RateLimit"
+
+  /taxista/listar:
+    get:
+      tags: ["Taxista — listagem"]
+      summary: Listar motoristas por relação e status
+      description: |
+        Lê a grade de motoristas do painel (`/taxista/index`) filtrando por **Relação** e **status**.
+        Somente leitura. Exige o header `X-Session-Token`.
+
+        - A grade tem **10 itens por página**. Use `pagina`, ou `todas=true` para percorrer todas
+          (em praças grandes pode levar minutos; acima de 400 páginas a rota recusa com `lista_grande_demais`).
+        - O `status` é sempre enviado ao painel. Sem ele o painel usaria um filtro salvo na sessão
+          e o total mudaria. Padrão: `A` (ativos).
+        - Exemplo de totais reais (Mariana): todos os status = 1594 (1111 prioritários, 483 secundários);
+          só ativos = 192 (182 prioritários, 10 secundários).
+      operationId: taxistaListar
+      parameters:
+        - $ref: "#/components/parameters/SessionTokenHeaderObrigatorio"
+        - name: relacao
+          in: query
+          schema:
+            type: string
+            enum: [prioritario, secundario, todos]
+            default: todos
+        - name: status
+          in: query
+          description: "Letras do painel separadas por vírgula: A ativo, I inativo, S suspenso, G, R rejeitado, D deletado, E em análise, F fila de espera."
+          schema:
+            type: string
+            default: A
+          example: A,I
+        - name: pagina
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: todas
+          in: query
+          description: Percorre todas as páginas e devolve todos os itens
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Lista de motoristas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaxistaListaResponse"
+              example:
+                sucesso: true
+                relacao: secundario
+                status: ["A"]
+                total: 10
+                pagina: 1
+                paginas: 1
+                por_pagina: 10
+                todas: true
+                completo: true
+                itens:
+                  - taxista_id: 772770
+                    nome: Fulano de Tal
+                    status: Ativo
+                    categorias: ["Corrida Central", "Maçaneta"]
+        "401":
+          $ref: "#/components/responses/UnauthorizedSession"
+        "403":
+          $ref: "#/components/responses/ErroCodigo"
+        "422":
+          $ref: "#/components/responses/ErroCodigo"
+        "400":
+          $ref: "#/components/responses/ErroNegocio"
 
 components:
   securitySchemes:
@@ -215,6 +431,15 @@ components:
         format: uuid
       description: Token de `POST /notificacao/login` (obrigatório se não enviar e-mail/senha no body)
 
+    SessionTokenHeaderObrigatorio:
+      name: X-Session-Token
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Token de `POST /notificacao/login`
+
   schemas:
     LoginPainelInput:
       type: object
@@ -226,11 +451,6 @@ components:
         senha:
           type: string
           format: password
-        codigo_2fa:
-          type: string
-        chave_secreta:
-          type: string
-          description: Segredo TOTP Base32
 
     LoginPainelResponse:
       type: object
@@ -246,7 +466,7 @@ components:
 
     CidadePainelInput:
       type: object
-      description: Credenciais opcionais se usar X-Session-Token
+      description: E-mail e senha do painel; omitir ambos ao usar X-Session-Token. O 2FA fica no servidor.
       properties:
         email:
           type: string
@@ -254,10 +474,6 @@ components:
         senha:
           type: string
           format: password
-        codigo_2fa:
-          type: string
-        chave_secreta:
-          type: string
 
     TaxistaPrioridadeInput:
       allOf:
@@ -269,6 +485,10 @@ components:
               type: integer
               description: ID do motorista no painel Machine
               example: 772770
+            dry_run:
+              type: boolean
+              default: false
+              description: Lê o formulário e devolve o que seria alterado, sem gravar e sem pedir 2FA
 
     TaxistaRelacaoInput:
       allOf:
@@ -297,6 +517,109 @@ components:
           type: string
         valor_aplicado:
           type: string
+        dry_run:
+          type: boolean
+        inalterado:
+          type: boolean
+          description: true quando o motorista já estava no valor pedido (nada foi gravado)
+        alteracoes:
+          type: array
+          description: Diff completo (todos os campos) entre o formulário antes e depois da gravação
+          items:
+            $ref: "#/components/schemas/AlteracaoCampo"
+        alteracoes_inesperadas:
+          type: array
+          description: Campos alterados além de Taxista[taxista_apoio]. Deve vir vazio.
+          items:
+            $ref: "#/components/schemas/AlteracaoCampo"
+        alteracoes_previstas:
+          type: array
+          description: Só no dry_run — o que seria alterado
+          items:
+            $ref: "#/components/schemas/AlteracaoCampo"
+        campos_enviados:
+          type: integer
+          description: Só no dry_run — quantos pares campo/valor seriam enviados ao painel
+        campos_desabilitados_nao_enviados:
+          type: array
+          description: Só no dry_run — campos desabilitados no painel (não são enviados, como no navegador)
+          items:
+            type: string
+
+    AlteracaoCampo:
+      type: object
+      properties:
+        campo:
+          type: string
+          example: Taxista[taxista_apoio]
+        antes:
+          type: array
+          items:
+            type: string
+        depois:
+          type: array
+          items:
+            type: string
+
+    TaxistaRelacaoPatchInput:
+      allOf:
+        - $ref: "#/components/schemas/CidadePainelInput"
+        - type: object
+          required: [relacao]
+          properties:
+            relacao:
+              type: string
+              enum: [prioritario, secundario]
+            dry_run:
+              type: boolean
+              default: false
+
+    TaxistaItem:
+      type: object
+      properties:
+        taxista_id:
+          type: integer
+        nome:
+          type: string
+        status:
+          type: string
+          example: Ativo
+        categorias:
+          type: array
+          items:
+            type: string
+
+    TaxistaListaResponse:
+      type: object
+      properties:
+        sucesso:
+          type: boolean
+        relacao:
+          type: string
+          enum: [prioritario, secundario, todos]
+        status:
+          type: array
+          items:
+            type: string
+        total:
+          type: integer
+          description: Total de motoristas que atendem ao filtro
+        pagina:
+          type: integer
+        paginas:
+          type: integer
+        por_pagina:
+          type: integer
+          example: 10
+        todas:
+          type: boolean
+        completo:
+          type: boolean
+          description: true quando todas=true e todos os itens foram lidos
+        itens:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaxistaItem"
 
     ErroDetail:
       type: object
@@ -304,6 +627,24 @@ components:
         sucesso:
           type: boolean
           example: false
+        codigo:
+          type: string
+          description: Código estável do erro (rotas /taxista/*)
+          enum:
+            - sessao_expirada
+            - sem_permissao
+            - campo_desabilitado
+            - bandeira_desativada
+            - usuario_bloqueado
+            - taxista_nao_encontrado
+            - painel_nao_gravou
+            - 2fa_sem_segredo
+            - saldo_minimo
+            - validacao_painel
+            - parametro_invalido
+            - lista_grande_demais
+            - painel_indisponivel
+            - erro_painel
         mensagem:
           type: string
 
@@ -350,3 +691,28 @@ components:
             properties:
               detail:
                 $ref: "#/components/schemas/ErroDetail"
+    ErroCodigo:
+      description: |
+        Erro com `codigo` estável e status HTTP específico:
+
+        | codigo | HTTP |
+        |---|---|
+        | `sessao_expirada` | 401 |
+        | `sem_permissao`, `campo_desabilitado`, `bandeira_desativada`, `usuario_bloqueado` | 403 |
+        | `taxista_nao_encontrado` | 404 |
+        | `painel_nao_gravou`, `2fa_sem_segredo` | 409 |
+        | `saldo_minimo`, `validacao_painel`, `parametro_invalido`, `lista_grande_demais` | 422 |
+        | `painel_indisponivel` | 502 |
+        | `erro_painel` | 400 |
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              detail:
+                $ref: "#/components/schemas/ErroDetail"
+          example:
+            detail:
+              sucesso: false
+              codigo: painel_nao_gravou
+              mensagem: "Painel não gravou Taxista[taxista_apoio]: esperado value='1', lido='0' após POST."

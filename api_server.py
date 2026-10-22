@@ -57,6 +57,8 @@ Endpoints:
     POST /taxista/relacao             - Altera Relação (prioritário/secundário) em /taxista/update/{id}
     POST /taxista/prioridade/ativar   - Mesmo login da cidade; define motorista prioritário
     POST /taxista/prioridade/remover  - Mesmo login; volta para secundário (não exclui cadastro)
+    PATCH /taxista/{id}/relacao       - Altera UM motorista (idempotente, dry_run, diff antes/depois)
+    GET  /taxista/listar              - Lista motoristas por relação (prioritario|secundario|todos) e status
     POST /categoria/listar            - Lista categorias /categoria/tarifa (nome, ordem, exibir)
     PATCH /categoria/ordem            - Define posição por nome da categoria
     PATCH /categoria/exibir           - Exibir ou ocultar categoria no app passageiro

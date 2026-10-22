@@ -1,4 +1,4 @@
-SWAGGER — prioridade do motorista (ativar / remover)
+SWAGGER — prioridade do motorista (ativar / remover / listar / PATCH)
 ====================================================
 
 IMPORTAR NO SWAGGER EDITOR (recomendado):
@@ -18,3 +18,5 @@ Rotas documentadas:
   POST /taxista/prioridade/ativar   → motorista prioritário
   POST /taxista/prioridade/remover  → motorista secundário
   POST /taxista/relacao             → alias com campo relacao
+  PATCH /taxista/{id}/relacao       → altera UM motorista (idempotente, dry_run) — para laço no cliente
+  GET  /taxista/listar              → lista motoristas por relação e status (10 por página; todas=true)
