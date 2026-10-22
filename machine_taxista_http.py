@@ -338,27 +338,43 @@ def _normalizar_telefone_taxista(valor: str) -> str:
     return (valor or "").strip()
 
 
-def _telefone_como_navegador(fields: Dict[str, List[str]]) -> None:
-    """Ajusta o telefone ao formato que o painel aceita no POST.
+def _variantes_telefone(fields: Dict[str, List[str]]) -> List[Tuple[str, Dict[str, List[str]]]]:
+    """Formas de enviar o telefone, da que o navegador usa para as que o robô antigo usava.
 
-    O HTML traz "+55 31 98734-0913". Postar esse valor cru, ou só a parte nacional sem parênteses,
-    faz o painel responder "Telefone é inválido" depois do 2FA da ação. O formato aceito é
-    "(31) 98734-0913", e o `full_phone` internacional acompanha (como o submit da página faz).
-    O número em si não muda.
+    O HTML traz "+55 31 98734-0913" e não traz `full_phone` nem `country_code`: o plugin de telefone
+    da página cria esses dois campos ao enviar e posta só a parte nacional. O painel responde
+    "Telefone é inválido" para o valor cru; aceita a forma abaixo. O número em si nunca muda.
     """
-    tel = (fields.get("Taxista[telefone]") or [""])[0]
-    if not tel.strip().startswith("+"):
-        return
-    _set_field(fields, "Taxista[telefone]", _normalizar_telefone_taxista(tel))
-    _set_field(fields, "full_phone", "+" + re.sub(r"\D+", "", tel))
+    tel = (fields.get("Taxista[telefone]") or [""])[0].strip()
+    m = re.match(r"^\+(\d{1,3})\s+(.+)$", tel)
+    if not m:
+        return [("original", {k: list(v) for k, v in fields.items()})]
+    cc, nacional = m.group(1), m.group(2).strip()
+    full = "+" + re.sub(r"\D+", "", tel)
+    pais = "br" if cc == "55" else ""
+    parenteses = _normalizar_telefone_taxista(tel)
+
+    def montar(telefone: str, completo: bool) -> Dict[str, List[str]]:
+        f = {k: list(v) for k, v in fields.items()}
+        _set_field(f, "Taxista[telefone]", telefone)
+        if completo:
+            _set_field(f, "full_phone", full)
+            if pais:
+                _set_field(f, "country_code", pais)
+        else:
+            f.pop("full_phone", None)
+            f.pop("country_code", None)
+        return f
+
+    return [
+        ("navegador", montar(nacional, True)),
+        ("parenteses_completo", montar(parenteses, True)),
+        ("parenteses", montar(parenteses, False)),
+    ]
 
 
 def _preparar_campos_taxista_post(fields: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    """Posta o formulário como o navegador enviaria: só o campo-alvo muda.
-
-    Não reescreve o vínculo (o painel o desabilita). O telefone só troca de formato, como no navegador.
-    """
-    _telefone_como_navegador(fields)
+    """Posta o formulário como o navegador enviaria: só o campo-alvo muda (vínculo fica como está)."""
     return _limpar_campos_para_post(fields)
 
 
@@ -546,10 +562,11 @@ def atualizar_relacao_taxista(
     if antes == novo:
         return {**base, "inalterado": True, "alteracoes": [], "alteracoes_inesperadas": []}
 
-    base_navegador = _preparar_campos_taxista_post({k: list(v) for k, v in fields.items()})
-    a_postar = {k: list(v) for k, v in fields.items()}
-    _set_field(a_postar, field_name, novo)
-    a_postar = _preparar_campos_taxista_post(a_postar)
+    base_navegador = _preparar_campos_taxista_post(_variantes_telefone(fields)[0][1])
+    a_postar_base = {k: list(v) for k, v in fields.items()}
+    _set_field(a_postar_base, field_name, novo)
+    variantes = [(n, _preparar_campos_taxista_post(f)) for n, f in _variantes_telefone(a_postar_base)]
+    a_postar = variantes[0][1]
     previstas = diff_formularios(base_navegador, a_postar)
 
     if dry_run:
@@ -562,7 +579,6 @@ def atualizar_relacao_taxista(
         }
 
     url = f"{BASE_URL}/taxista/update/{int(taxista_id)}"
-    pairs = _pairs_from_fields(a_postar, html)
     headers = {
         "Referer": url,
         "Content-Type": "application/x-www-form-urlencoded",
@@ -571,19 +587,27 @@ def atualizar_relacao_taxista(
     if chave_secreta and gerar_codigo_fn:
         _autenticar_acao_taxista(http, url, chave_secreta, gerar_codigo_fn)
 
-    r = http.post(url, data=pairs, headers=headers, timeout=180, allow_redirects=True)
-    if _resposta_precisa_2fa_acao(r):
-        log.info("Gravar taxista pediu 2FA de ação — autenticando…")
-        _autenticar_acao_taxista(http, url, chave_secreta, gerar_codigo_fn)
+    variante_usada = variantes[0][0]
+    for pos, (nome_var, campos) in enumerate(variantes):
+        pairs = _pairs_from_fields(campos, html)
         r = http.post(url, data=pairs, headers=headers, timeout=180, allow_redirects=True)
+        if _resposta_precisa_2fa_acao(r):
+            log.info("Gravar taxista pediu 2FA de ação — autenticando…")
+            _autenticar_acao_taxista(http, url, chave_secreta, gerar_codigo_fn)
+            r = http.post(url, data=pairs, headers=headers, timeout=180, allow_redirects=True)
 
-    text = r.text or ""
-    if "LoginForm" in text and "Taxista[" not in text:
-        raise PainelErro("sessao_expirada", "Sessão expirada ao gravar taxista.", 401)
+        text = r.text or ""
+        if "LoginForm" in text and "Taxista[" not in text:
+            raise PainelErro("sessao_expirada", "Sessão expirada ao gravar taxista.", 401)
 
-    erros = _erros_do_painel(text)
-    if erros:
+        erros = _erros_do_painel(text)
+        if not erros:
+            variante_usada = nome_var
+            break
         msg = "; ".join(erros)
+        if "elefone" in msg and pos < len(variantes) - 1:
+            log.warning("taxista %s: painel recusou o telefone (variante %s): %s", taxista_id, nome_var, msg)
+            continue
         codigo, status = classificar_erro(RuntimeError(msg))
         if codigo == "erro_painel":
             codigo, status = "validacao_painel", 422
@@ -621,6 +645,7 @@ def atualizar_relacao_taxista(
         "inalterado": False,
         "alteracoes": alteracoes,
         "alteracoes_inesperadas": inesperadas,
+        "telefone_variante": variante_usada,
     }
 
 

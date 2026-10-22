@@ -132,21 +132,27 @@ class ParserNavegadorTests(unittest.TestCase):
         )
 
 
-class TelefoneComoNavegadorTests(unittest.TestCase):
-    def test_remove_codigo_do_pais_e_preenche_full_phone(self):
-        f = {"Taxista[telefone]": ["+55 31 98734-0913"], "full_phone": [""]}
-        auto = __import__("machine_taxista_http")
-        auto._telefone_como_navegador(f)
-        self.assertEqual(f["Taxista[telefone]"], ["(31) 98734-0913"])
-        self.assertEqual(f["full_phone"], ["+5531987340913"])
+class VariantesTelefoneTests(unittest.TestCase):
+    def test_ordem_e_conteudo_das_variantes(self):
+        from machine_taxista_http import _variantes_telefone
+        f = {"Taxista[telefone]": ["+55 31 98734-0913"], "Taxista[nome]": ["Ana"]}
+        v = dict(_variantes_telefone(f))
+        self.assertEqual(list(v), ["navegador", "parenteses_completo", "parenteses"])
+        self.assertEqual(v["navegador"]["Taxista[telefone]"], ["31 98734-0913"])
+        self.assertEqual(v["navegador"]["full_phone"], ["+5531987340913"])
+        self.assertEqual(v["navegador"]["country_code"], ["br"])
+        self.assertEqual(v["parenteses_completo"]["Taxista[telefone]"], ["(31) 98734-0913"])
+        self.assertNotIn("full_phone", v["parenteses"])
+        self.assertNotIn("country_code", v["parenteses"])
+        for variante in v.values():
+            self.assertEqual(variante["Taxista[nome]"], ["Ana"])
 
-    def test_telefone_ja_nacional_ou_vazio_nao_muda(self):
-        auto = __import__("machine_taxista_http")
-        for tel in ("31 98734-0913", "(31) 98734-0913", ""):  # sem "+": não mexe
-            f = {"Taxista[telefone]": [tel], "full_phone": ["+5531987340913"]}
-            auto._telefone_como_navegador(f)
-            self.assertEqual(f["Taxista[telefone]"], [tel])
-            self.assertEqual(f["full_phone"], ["+5531987340913"])
+    def test_telefone_sem_codigo_do_pais_fica_como_esta(self):
+        from machine_taxista_http import _variantes_telefone
+        for tel in ("31 98734-0913", "(31) 98734-0913", ""):
+            v = _variantes_telefone({"Taxista[telefone]": [tel]})
+            self.assertEqual([n for n, _ in v], ["original"])
+            self.assertEqual(v[0][1]["Taxista[telefone]"], [tel])
 
 
 class ClassificarErroTests(unittest.TestCase):
@@ -192,9 +198,11 @@ class AtualizarRelacaoTests(unittest.TestCase):
         enviados = dict(http.posts[0])
         self.assertEqual(enviados["Taxista[taxista_apoio]"], "0")
         self.assertNotIn("Taxista[vinculo]", enviados)
-        # formato que o painel aceita + full_phone internacional (o número não muda)
-        self.assertEqual(enviados["Taxista[telefone]"], "(31) 98734-0913")
+        # como o navegador: parte nacional + full_phone e country_code (o número não muda)
+        self.assertEqual(enviados["Taxista[telefone]"], "31 98734-0913")
         self.assertEqual(enviados["full_phone"], "+5531987340913")
+        self.assertEqual(enviados["country_code"], "br")
+        self.assertEqual(r["telefone_variante"], "navegador")
         self.assertEqual(enviados["Taxista[nome]"], "João & Cia")
         self.assertEqual(r["alteracoes_inesperadas"], [])
         self.assertEqual([a["campo"] for a in r["alteracoes"]], ["Taxista[taxista_apoio]"])
@@ -206,6 +214,31 @@ class AtualizarRelacaoTests(unittest.TestCase):
         http = _Http(_html(apoio="1"), on_post=aplica)
         r = atualizar_relacao_taxista(http, 99, "prioritario")
         self.assertEqual([a["campo"] for a in r["alteracoes_inesperadas"]], ["Taxista[telefone]"])
+
+    def test_painel_recusa_telefone_tenta_proxima_variante(self):
+        erro = '<div class="errorSummary"><ul><li>Telefone é inválido</li></ul></div>'
+
+        class HttpTel(_Http):
+            def post(self, url, data=None, **kw):
+                d = dict(data)
+                self.posts.append(list(data))
+                if d.get("Taxista[telefone]") == "31 98734-0913":
+                    return _Resp(_html(apoio="1") + erro)
+                self.html = _html(apoio=d["Taxista[taxista_apoio]"])
+                return _Resp(self.html)
+
+        http = HttpTel(_html(apoio="1"))
+        r = atualizar_relacao_taxista(http, 99, "prioritario")
+        self.assertEqual(len(http.posts), 2)
+        self.assertEqual(dict(http.posts[1])["Taxista[telefone]"], "(31) 98734-0913")
+        self.assertEqual(r["telefone_variante"], "parenteses_completo")
+
+    def test_erro_que_nao_e_de_telefone_nao_repete(self):
+        erro = '<div class="errorSummary"><ul><li>Número Banco é inválido</li></ul></div>'
+        http = _Http(_html(apoio="1"), resposta_post=_html(apoio="1") + erro)
+        with self.assertRaises(PainelErro):
+            atualizar_relacao_taxista(http, 99, "prioritario")
+        self.assertEqual(len(http.posts), 1)
 
     def test_painel_nao_gravou(self):
         http = _Http(_html(apoio="1"))
