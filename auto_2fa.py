@@ -13,6 +13,7 @@ import platform
 import subprocess
 import stat
 import uuid
+import shutil
 import pyotp
 import totp_store
 from selenium import webdriver
@@ -35,8 +36,67 @@ URL_LOGIN = "https://cloud.taximachine.com.br/"
 TIMEOUT = 20
 CHAVES_FILE = os.environ.get("TOTP_STORE_PATH") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "chaves_totp.json")
 
-# Armazena drivers abertos para evitar garbage collection quando manter_aberto=True
-_drivers_abertos = {}
+class _DriversAbertos(dict):
+    """Drivers mantidos abertos por e-mail (evita garbage collection com manter_aberto=True).
+
+    Registrar um novo driver para o mesmo e-mail encerra o anterior; antes ele era só
+    sobrescrito, e o Chrome antigo ficava rodando órfão na VPS.
+    """
+
+    def __setitem__(self, email, driver):
+        anterior = self.get(email)
+        super().__setitem__(email, driver)
+        if anterior is not None and anterior is not driver:
+            try:
+                anterior.quit()
+            except Exception:
+                pass
+
+
+_drivers_abertos = _DriversAbertos()
+
+# Perfis do Chrome (run-<uuid>) mais velhos que isto e sem driver aberto são apagados.
+PERFIL_CHROME_IDADE_MAX_SEG = 6 * 3600
+_ultima_limpeza_perfis = 0.0
+
+
+def _remover_perfil(profile_dir: str) -> None:
+    shutil.rmtree(profile_dir, ignore_errors=True)
+
+
+def _limpar_perfis_antigos(profile_root: str, idade_max_seg: float = PERFIL_CHROME_IDADE_MAX_SEG) -> int:
+    """Apaga perfis run-* antigos de execuções que não chamaram quit (crash/restart).
+
+    Preserva os perfis de drivers ainda mantidos abertos. No máximo uma varredura a cada 30 min.
+    """
+    global _ultima_limpeza_perfis
+    agora = time.time()
+    if agora - _ultima_limpeza_perfis < 1800:
+        return 0
+    _ultima_limpeza_perfis = agora
+
+    em_uso = {getattr(d, "_perfil_dir", None) for d in list(_drivers_abertos.values())}
+    removidos = 0
+    try:
+        nomes = os.listdir(profile_root)
+    except OSError:
+        return 0
+    for nome in nomes:
+        if not nome.startswith("run-"):
+            continue
+        caminho = os.path.join(profile_root, nome)
+        if caminho in em_uso:
+            continue
+        try:
+            if agora - os.path.getmtime(caminho) < idade_max_seg:
+                continue
+        except OSError:
+            continue
+        _remover_perfil(caminho)
+        removidos += 1
+    if removidos:
+        log.info("Perfis antigos do Chrome removidos: %d", removidos)
+    return removidos
 
 
 def salvar_chave(email: str, chave_totp: str):
@@ -137,6 +197,7 @@ def criar_driver(headless: bool = False) -> webdriver.Chrome:
         os.path.expanduser("~"), ".chrome-machine"
     )
     os.makedirs(profile_root, exist_ok=True)
+    _limpar_perfis_antigos(profile_root)
     profile_dir = os.path.join(profile_root, f"run-{uuid.uuid4().hex[:12]}")
     os.makedirs(profile_dir, exist_ok=True)
     opts.add_argument(f"--user-data-dir={profile_dir}")
@@ -174,7 +235,20 @@ def criar_driver(headless: bool = False) -> webdriver.Chrome:
             driver = webdriver.Chrome(service=Service(path), options=opts)
         except WebDriverException as e2:
             log.error("Chrome também falhou com webdriver-manager.")
+            _remover_perfil(profile_dir)
             raise e2 from e
+
+    # O perfil é descartável: apaga junto com o quit() (antes ficava no disco para sempre).
+    driver._perfil_dir = profile_dir
+    _quit_original = driver.quit
+
+    def _quit_e_limpar():
+        try:
+            _quit_original()
+        finally:
+            _remover_perfil(profile_dir)
+
+    driver.quit = _quit_e_limpar
 
     driver.implicitly_wait(5)
     return driver
