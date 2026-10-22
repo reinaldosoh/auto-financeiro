@@ -22,12 +22,16 @@ info:
 
     **Erros** — o corpo traz `codigo` estável (ver `ErroDetail`) e o status HTTP correspondente.
 
-    **Autenticação**
-    1. **`X-API-Key`** — obrigatória em todas as requisições.
-    2. **Painel** — credenciais da **cidade** (e-mail e senha; 2FA resolvido internamente pela VPS) **ou** sessão via header **`X-Session-Token`**
-       (retornado por `POST /notificacao/login`).
+    **Autenticação em duas camadas**
+    1. **`X-API-Key`** — obrigatória em todas as requisições (chave fornecida pelo operador da VPS).
+    2. **Painel Machine** — login da **cidade** (e-mail + senha; 2FA resolvido internamente pela VPS) ou reutilização de sessão via **`X-Session-Token`**.
 
-    **Importante:** não envie `session_token` no JSON — use apenas o header `X-Session-Token`.
+    **Fluxo recomendado**
+    1. `POST /notificacao/login` com e-mail e senha da cidade → guardar `session_token` da resposta.
+    2. Nas rotas `/taxista/*`, enviar **`X-Session-Token: {token}`** e o corpo JSON só com os campos da operação.
+    3. **Não** envie `session_token` no JSON — a API retorna `401` (use apenas o header).
+    4. A sessão vale ~30 minutos. Em `401` com `codigo: sessao_expirada`, faça novo login e continue.
+    5. Faça **um** login e reaproveite o token em todo o laço; logins repetidos com e-mail/senha podem retornar `429`.
 
     **2FA automático — integração de terceiros**
     O terceiro informa somente o e-mail e a senha do painel Machine da mesma conta/cidade

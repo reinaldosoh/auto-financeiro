@@ -8,15 +8,23 @@ info:
 
     **Autenticação em duas camadas**
     1. **`X-API-Key`** — obrigatória em todas as requisições (chave fornecida pelo operador da VPS).
-    2. **Painel Machine** — login da **cidade** (e-mail + senha + TOTP) ou reutilização de sessão via **`X-Session-Token`**.
+    2. **Painel Machine** — login da **cidade** (e-mail + senha; 2FA resolvido internamente pela VPS) ou reutilização de sessão via **`X-Session-Token`**.
 
     **Fluxo recomendado**
     1. `POST /notificacao/login` com credenciais da cidade → guardar `session_token` da resposta.
     2. Nas rotas `/categoria/*`, enviar **`X-Session-Token: {token}`** e corpo JSON só com os campos da operação (`{}` em listar).
     3. **Não** envie `session_token` no JSON — a API retorna `401` (use apenas o header).
+    4. A sessão vale ~30 minutos. Em `401` por sessão expirada, faça novo login e continue.
 
-    **2FA em gravação** — alterar ordem ou exibição pode exigir TOTP de ação no painel.
-    Envie `chave_secreta` (Base32) no corpo na primeira chamada sem sessão, ou configure TOTP no servidor da VPS após `POST /autenticar`.
+    **2FA automático — integração de terceiros**
+    O terceiro informa somente o e-mail e a senha do painel Machine da mesma conta/cidade
+    conectada no Radar. O TOTP dessa conta deve estar previamente sincronizado no cofre
+    criptografado da VPS. O servidor resolve o segredo pelo e-mail e o usa internamente
+    no login e nas alterações de ordem/exibição. Não enviar `chave_secreta` ou `codigo_2fa`.
+    Se o segredo não estiver disponível, a equipe Radar deve corrigir a integração/cofre;
+    o terceiro não deve gerar outro autenticador nem receber o segredo.
+    A presença de uma cidade ativa no Radar, sozinha, não sincroniza automaticamente um
+    segredo ausente na VPS. Esta rota não consulta o estado ativo da cidade no Radar.
 
     **Limites** — logins repetidos com e-mail/senha podem retornar `429`; prefira sessão após o primeiro login.
 
@@ -59,8 +67,10 @@ paths:
   /notificacao/login:
     post:
       tags: [Sessão]
-      summary: Login no painel Machine (HTTP)
+      summary: Login com e-mail e senha (2FA automático no servidor)
       description: |
+        Enviar somente e-mail e senha do painel Machine. O servidor consulta o TOTP
+        previamente salvo para esse e-mail e faz o 2FA internamente.
         Retorna `session_token` (UUID) válido por ~30 minutos no servidor da VPS.
         Use esse valor no header **`X-Session-Token`** nas rotas `/categoria/*`.
       operationId: notificacaoLogin
@@ -72,8 +82,8 @@ paths:
               $ref: "#/components/schemas/LoginPainelInput"
             example:
               email: cidade@exemplo.com
-              senha: "***"
-              chave_secreta: JBSWY3DPEHPK3PXP
+              senha: "SENHA_DO_PAINEL"
+
       responses:
         "200":
           description: Login OK
@@ -109,11 +119,11 @@ paths:
                 summary: Com sessão (recomendado)
                 value: {}
               com_credenciais:
-                summary: Login automático (evite em loop — rate limit)
+                summary: E-mail e senha; TOTP interno (evite login em loop)
                 value:
                   email: cidade@exemplo.com
-                  senha: "***"
-                  chave_secreta: JBSWY3DPEHPK3PXP
+                  senha: "SENHA_DO_PAINEL"
+
       responses:
         "200":
           description: Lista de categorias
@@ -233,12 +243,6 @@ components:
         senha:
           type: string
           format: password
-        codigo_2fa:
-          type: string
-          description: Código de 6 dígitos (só se o login pedir na hora)
-        chave_secreta:
-          type: string
-          description: Segredo TOTP Base32 (recomendado para contas com 2FA)
 
     LoginPainelResponse:
       type: object
@@ -259,7 +263,7 @@ components:
       type: object
       description: |
         Com `X-Session-Token` no header, envie `{}` ou omita credenciais.
-        Sem header, informe `email` e `senha` (e `chave_secreta` se 2FA).
+        Sem header, informe somente `email` e `senha`; o servidor usa o TOTP já salvo para a conta.
       properties:
         email:
           type: string
@@ -267,10 +271,6 @@ components:
         senha:
           type: string
           format: password
-        codigo_2fa:
-          type: string
-        chave_secreta:
-          type: string
 
     CategoriaItem:
       type: object
