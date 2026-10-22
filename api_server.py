@@ -448,6 +448,13 @@ class TaxistaRelacaoInput(TaxistaPrioridadeInput):
     relacao: Literal["prioritario", "secundario"]
 
 
+class TaxistaRelacaoPatchInput(CidadePainelInput):
+    """Corpo do PATCH /taxista/{taxista_id}/relacao (o ID vem na URL)."""
+
+    relacao: Literal["prioritario", "secundario"]
+    dry_run: bool = False
+
+
 class RelatorioClientesInput(BaseModel):
     """Use `session_token` ou `email` + `senha` (login automático)."""
 
@@ -1784,6 +1791,31 @@ async def taxista_listar(
     except Exception as e:
         log.warning("Falha GET /taxista/listar: %s", e)
         raise _taxista_http_erro(e)
+
+
+@app.patch("/taxista/{taxista_id}/relacao")
+async def taxista_relacao_patch(
+    taxista_id: int,
+    inp: TaxistaRelacaoPatchInput,
+    request: Request,
+    x_session_token: SessionHeader = "",
+):
+    """
+    Altera a Relação de UM motorista (prioritario | secundario).
+
+    Pensado para laço no cliente: `GET /taxista/listar` → para cada `taxista_id`, este PATCH.
+    Idempotente: se já estiver no valor pedido, responde `inalterado: true` sem gravar.
+    """
+    completo = TaxistaRelacaoInput(
+        **inp.model_dump(), taxista_id=taxista_id
+    )
+    return await _taxista_alterar_relacao(
+        completo,
+        completo.relacao,
+        request,
+        "PATCH /taxista/{id}/relacao",
+        x_session_token,
+    )
 
 
 @app.post("/taxista/prioridade/ativar")

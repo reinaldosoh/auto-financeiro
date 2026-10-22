@@ -65,6 +65,31 @@ curl -sS "$BASE_URL/taxista/listar?relacao=secundario&status=A&todas=true" \
 Resposta: `total`, `pagina`, `paginas`, `itens` (`taxista_id`, `nome`, `status`, `categorias`) e `completo`.
 O status é sempre enviado ao painel; sem ele o painel usa um filtro salvo na sessão e o total muda.
 
+## Alterar a relação de todos (laço no cliente)
+
+A VPS não tem serviço de laço: o sistema que chama faz o laço. `PATCH /taxista/{taxista_id}/relacao`
+altera um motorista por chamada; é idempotente (já no valor pedido → `inalterado: true`, nada é gravado).
+
+```bash
+# 1) IDs dos motoristas (ex.: todos os ativos hoje prioritários)
+curl -sS "$BASE_URL/taxista/listar?relacao=prioritario&status=A&todas=true" \
+  -H "X-API-Key: $API_KEY" -H "X-Session-Token: $TOKEN" | jq -r '.itens[].taxista_id' > ids.txt
+
+# 2) Um PATCH por ID, em série (relacao: prioritario | secundario)
+while read -r ID; do
+  curl -sS -X PATCH "$BASE_URL/taxista/$ID/relacao" \
+    -H "X-API-Key: $API_KEY" -H "X-Session-Token: $TOKEN" -H "Content-Type: application/json" \
+    -d '{"relacao":"secundario"}'
+  sleep 1
+done < ids.txt
+```
+
+Regras do laço:
+- Uma chamada por vez, reaproveitando o mesmo `X-Session-Token` (não faça login a cada ID).
+- Teste antes com `"dry_run": true` e com poucos IDs; confira que `alteracoes_inesperadas` vem vazio.
+- Guarde o resultado de cada ID (`inalterado`, sucesso ou `codigo` do erro) para retomar de onde parou. Em erro `sessao_expirada` (401), faça novo login e continue.
+- Ignore motoristas deletados (`status=D`): o painel não grava edição neles.
+
 ## Corpo opcional
 
 - `"dry_run": true` — lê o formulário e devolve `alteracoes_previstas`, sem gravar e sem pedir 2FA.
