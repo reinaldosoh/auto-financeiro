@@ -339,17 +339,17 @@ def _normalizar_telefone_taxista(valor: str) -> str:
 
 
 def _telefone_como_navegador(fields: Dict[str, List[str]]) -> None:
-    """Reproduz o que o JavaScript da página faz com o telefone antes de enviar.
+    """Ajusta o telefone ao formato que o painel aceita no POST.
 
-    O HTML traz "+55 31 98734-0913"; o intl-tel-input (separateDialCode) mostra e posta só a parte
-    nacional ("31 98734-0913") e o submit grava `full_phone` em formato internacional. Enviar o valor
-    cru faz o painel responder "Telefone é inválido". O número em si não muda.
+    O HTML traz "+55 31 98734-0913". Postar esse valor cru, ou só a parte nacional sem parênteses,
+    faz o painel responder "Telefone é inválido" depois do 2FA da ação. O formato aceito é
+    "(31) 98734-0913", e o `full_phone` internacional acompanha (como o submit da página faz).
+    O número em si não muda.
     """
     tel = (fields.get("Taxista[telefone]") or [""])[0]
-    m = re.match(r"^\+(\d{1,3})\s+(.+)$", tel.strip())
-    if not m:
+    if not tel.strip().startswith("+"):
         return
-    _set_field(fields, "Taxista[telefone]", m.group(2).strip())
+    _set_field(fields, "Taxista[telefone]", _normalizar_telefone_taxista(tel))
     _set_field(fields, "full_phone", "+" + re.sub(r"\D+", "", tel))
 
 

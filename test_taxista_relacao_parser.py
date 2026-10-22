@@ -137,12 +137,12 @@ class TelefoneComoNavegadorTests(unittest.TestCase):
         f = {"Taxista[telefone]": ["+55 31 98734-0913"], "full_phone": [""]}
         auto = __import__("machine_taxista_http")
         auto._telefone_como_navegador(f)
-        self.assertEqual(f["Taxista[telefone]"], ["31 98734-0913"])
+        self.assertEqual(f["Taxista[telefone]"], ["(31) 98734-0913"])
         self.assertEqual(f["full_phone"], ["+5531987340913"])
 
     def test_telefone_ja_nacional_ou_vazio_nao_muda(self):
         auto = __import__("machine_taxista_http")
-        for tel in ("31 98734-0913", "(31) 98734-0913", ""):
+        for tel in ("31 98734-0913", "(31) 98734-0913", ""):  # sem "+": não mexe
             f = {"Taxista[telefone]": [tel], "full_phone": ["+5531987340913"]}
             auto._telefone_como_navegador(f)
             self.assertEqual(f["Taxista[telefone]"], [tel])
@@ -192,8 +192,8 @@ class AtualizarRelacaoTests(unittest.TestCase):
         enviados = dict(http.posts[0])
         self.assertEqual(enviados["Taxista[taxista_apoio]"], "0")
         self.assertNotIn("Taxista[vinculo]", enviados)
-        # como o navegador: telefone nacional + full_phone internacional (o número não muda)
-        self.assertEqual(enviados["Taxista[telefone]"], "31 98734-0913")
+        # formato que o painel aceita + full_phone internacional (o número não muda)
+        self.assertEqual(enviados["Taxista[telefone]"], "(31) 98734-0913")
         self.assertEqual(enviados["full_phone"], "+5531987340913")
         self.assertEqual(enviados["Taxista[nome]"], "João & Cia")
         self.assertEqual(r["alteracoes_inesperadas"], [])
