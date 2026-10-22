@@ -338,11 +338,27 @@ def _normalizar_telefone_taxista(valor: str) -> str:
     return (valor or "").strip()
 
 
+def _telefone_como_navegador(fields: Dict[str, List[str]]) -> None:
+    """Reproduz o que o JavaScript da página faz com o telefone antes de enviar.
+
+    O HTML traz "+55 31 98734-0913"; o intl-tel-input (separateDialCode) mostra e posta só a parte
+    nacional ("31 98734-0913") e o submit grava `full_phone` em formato internacional. Enviar o valor
+    cru faz o painel responder "Telefone é inválido". O número em si não muda.
+    """
+    tel = (fields.get("Taxista[telefone]") or [""])[0]
+    m = re.match(r"^\+(\d{1,3})\s+(.+)$", tel.strip())
+    if not m:
+        return
+    _set_field(fields, "Taxista[telefone]", m.group(2).strip())
+    _set_field(fields, "full_phone", "+" + re.sub(r"\D+", "", tel))
+
+
 def _preparar_campos_taxista_post(fields: Dict[str, List[str]]) -> Dict[str, List[str]]:
     """Posta o formulário como o navegador enviaria: só o campo-alvo muda.
 
-    Não reescreve telefone nem vínculo (o painel desabilita o vínculo e normaliza o telefone).
+    Não reescreve o vínculo (o painel o desabilita). O telefone só troca de formato, como no navegador.
     """
+    _telefone_como_navegador(fields)
     return _limpar_campos_para_post(fields)
 
 
@@ -530,10 +546,11 @@ def atualizar_relacao_taxista(
     if antes == novo:
         return {**base, "inalterado": True, "alteracoes": [], "alteracoes_inesperadas": []}
 
+    base_navegador = _preparar_campos_taxista_post({k: list(v) for k, v in fields.items()})
     a_postar = {k: list(v) for k, v in fields.items()}
     _set_field(a_postar, field_name, novo)
     a_postar = _preparar_campos_taxista_post(a_postar)
-    previstas = diff_formularios(fields, a_postar)
+    previstas = diff_formularios(base_navegador, a_postar)
 
     if dry_run:
         return {

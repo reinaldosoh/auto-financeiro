@@ -57,7 +57,8 @@ def _html(apoio="1", extra="", apoio_attrs=""):
 <form id="taxista-form" method="post" action="/taxista/update/99">
 <input type="hidden" name="YII_CSRF_TOKEN" value="tok" />
 <input type="text" name="Taxista[nome]" value="Jo&atilde;o &amp; Cia" />
-<input type="text" name="Taxista[telefone]" value="31 98734-0913" />
+<input type="tel" name="Taxista[telefone]" value="+55 31 98734-0913" />
+<input type="hidden" name="full_phone" value="" />
 <input type="text" name="ultima_atividade" value="agora" readonly />
 <select name="Taxista[vinculo]" disabled><option value="" selected>Selecione</option>
 <option value="T">Titular</option></select>
@@ -131,6 +132,23 @@ class ParserNavegadorTests(unittest.TestCase):
         )
 
 
+class TelefoneComoNavegadorTests(unittest.TestCase):
+    def test_remove_codigo_do_pais_e_preenche_full_phone(self):
+        f = {"Taxista[telefone]": ["+55 31 98734-0913"], "full_phone": [""]}
+        auto = __import__("machine_taxista_http")
+        auto._telefone_como_navegador(f)
+        self.assertEqual(f["Taxista[telefone]"], ["31 98734-0913"])
+        self.assertEqual(f["full_phone"], ["+5531987340913"])
+
+    def test_telefone_ja_nacional_ou_vazio_nao_muda(self):
+        auto = __import__("machine_taxista_http")
+        for tel in ("31 98734-0913", "(31) 98734-0913", ""):
+            f = {"Taxista[telefone]": [tel], "full_phone": ["+5531987340913"]}
+            auto._telefone_como_navegador(f)
+            self.assertEqual(f["Taxista[telefone]"], [tel])
+            self.assertEqual(f["full_phone"], ["+5531987340913"])
+
+
 class ClassificarErroTests(unittest.TestCase):
     def test_codigos(self):
         casos = {
@@ -174,14 +192,16 @@ class AtualizarRelacaoTests(unittest.TestCase):
         enviados = dict(http.posts[0])
         self.assertEqual(enviados["Taxista[taxista_apoio]"], "0")
         self.assertNotIn("Taxista[vinculo]", enviados)
+        # como o navegador: telefone nacional + full_phone internacional (o número não muda)
         self.assertEqual(enviados["Taxista[telefone]"], "31 98734-0913")
+        self.assertEqual(enviados["full_phone"], "+5531987340913")
         self.assertEqual(enviados["Taxista[nome]"], "João & Cia")
         self.assertEqual(r["alteracoes_inesperadas"], [])
         self.assertEqual([a["campo"] for a in r["alteracoes"]], ["Taxista[taxista_apoio]"])
 
     def test_alteracao_inesperada_e_reportada(self):
         def aplica(html, d):
-            return _html(apoio="0").replace("31 98734-0913", "(31) 98734-0913")
+            return _html(apoio="0").replace("+55 31 98734-0913", "(31) 98734-0913")
 
         http = _Http(_html(apoio="1"), on_post=aplica)
         r = atualizar_relacao_taxista(http, 99, "prioritario")
