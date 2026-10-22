@@ -32,6 +32,7 @@ info:
     3. **Não** envie `session_token` no JSON — a API retorna `401` (use apenas o header).
     4. A sessão vale ~30 minutos. Em `401` com `codigo: sessao_expirada`, faça novo login e continue.
     5. Faça **um** login e reaproveite o token em todo o laço; logins repetidos com e-mail/senha podem retornar `429`.
+    6. Antes de ligar uma praça, confira se o 2FA dela está no cofre com `POST /cofre/status` (não precisa de sessão).
 
     **2FA automático — integração de terceiros**
     O terceiro informa somente o e-mail e a senha do painel Machine da mesma conta/cidade
@@ -59,6 +60,8 @@ tags:
     description: Ativar ou remover prioridade (relação no cadastro)
   - name: Taxista — listagem
     description: Listar motoristas da cidade por relação e status (somente leitura)
+  - name: Cofre 2FA
+    description: Saber quais contas já têm o segredo 2FA no cofre da VPS (aptas a logar)
 
 security:
   - ApiKeyAuth: []
@@ -418,6 +421,52 @@ paths:
         "400":
           $ref: "#/components/responses/ErroNegocio"
 
+  /cofre/status:
+    post:
+      tags: ["Cofre 2FA"]
+      summary: Quais e-mails já têm o 2FA no cofre da VPS
+      description: |
+        Para cada e-mail informado, diz se a VPS tem o segredo 2FA daquela conta no cofre.
+        É o que define se o login (`POST /notificacao/login`) funciona sem o segredo na chamada.
+
+        - Envie os e-mails de login do painel de cada praça (até **500** por chamada).
+        - A resposta é só **booleana** (`no_cofre`). O segredo nunca é devolvido.
+        - Só confirma os e-mails que **você** enviou; a rota não lista o cofre.
+        - E-mails são comparados sem diferenciar maiúsculas/minúsculas; repetidos e vazios são ignorados.
+        - Não exige `X-Session-Token` (não faz login no painel); exige apenas `X-API-Key`.
+        - `no_cofre: false` → falta rodar `POST /autenticar` uma vez para essa conta (a equipe Radar faz isso).
+      operationId: cofreStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CofreStatusInput"
+            example:
+              emails:
+                - cidade-a@exemplo.com
+                - cidade-b@exemplo.com
+      responses:
+        "200":
+          description: Situação de cada e-mail no cofre
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CofreStatusResponse"
+              example:
+                sucesso: true
+                total: 2
+                no_cofre: 1
+                resultados:
+                  - email: cidade-a@exemplo.com
+                    no_cofre: true
+                  - email: cidade-b@exemplo.com
+                    no_cofre: false
+        "401":
+          $ref: "#/components/responses/UnauthorizedApiKey"
+        "422":
+          description: Lista inválida ou com mais de 500 e-mails
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -624,6 +673,43 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TaxistaItem"
+
+    CofreStatusInput:
+      type: object
+      required: [emails]
+      properties:
+        emails:
+          type: array
+          maxItems: 500
+          items:
+            type: string
+            format: email
+
+    CofreStatusItem:
+      type: object
+      properties:
+        email:
+          type: string
+          description: E-mail normalizado (minúsculas)
+        no_cofre:
+          type: boolean
+          description: true se a VPS tem o segredo 2FA dessa conta
+
+    CofreStatusResponse:
+      type: object
+      properties:
+        sucesso:
+          type: boolean
+        total:
+          type: integer
+          description: E-mails distintos analisados
+        no_cofre:
+          type: integer
+          description: Quantos deles têm o 2FA no cofre
+        resultados:
+          type: array
+          items:
+            $ref: "#/components/schemas/CofreStatusItem"
 
     ErroDetail:
       type: object

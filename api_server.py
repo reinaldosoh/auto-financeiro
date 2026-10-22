@@ -59,6 +59,7 @@ Endpoints:
     POST /taxista/prioridade/remover  - Mesmo login; volta para secundário (não exclui cadastro)
     PATCH /taxista/{id}/relacao       - Altera UM motorista (idempotente, dry_run, diff antes/depois)
     GET  /taxista/listar              - Lista motoristas por relação (prioritario|secundario|todos) e status
+    POST /cofre/status                - Quais e-mails têm segredo 2FA no cofre (só booleano; uso do Radar)
     POST /categoria/listar            - Lista categorias /categoria/tarifa (nome, ordem, exibir)
     PATCH /categoria/ordem            - Define posição por nome da categoria
     PATCH /categoria/exibir           - Exibir ou ocultar categoria no app passageiro
@@ -696,6 +697,40 @@ async def gerar_codigo_endpoint(inp: CodigoInput):
         return {"sucesso": False, "codigo": "", "mensagem": "Chave TOTP não encontrada para este email."}
     codigo = gerar_codigo(chave)
     return {"sucesso": True, "codigo": codigo, "email": inp.email}
+
+
+class CofreStatusInput(BaseModel):
+    emails: List[str]
+
+    @field_validator("emails")
+    @classmethod
+    def _limite_emails(cls, v: List[str]) -> List[str]:
+        if len(v) > 500:
+            raise ValueError("Envie no máximo 500 e-mails por chamada.")
+        return v
+
+
+@app.post("/cofre/status")
+async def cofre_status(inp: CofreStatusInput):
+    """
+    Informa, por e-mail, se a VPS tem o segredo 2FA no cofre. Só devolve booleano —
+    nunca o segredo. Serve para o Radar saber quais cidades já estão aptas a logar.
+    """
+    cofre = carregar_chaves()
+    resultados = []
+    vistos = set()
+    for email in inp.emails:
+        chave = (email or "").strip().lower()
+        if not chave or chave in vistos:
+            continue
+        vistos.add(chave)
+        resultados.append({"email": chave, "no_cofre": bool(cofre.get(chave))})
+    return {
+        "sucesso": True,
+        "total": len(resultados),
+        "no_cofre": sum(1 for r in resultados if r["no_cofre"]),
+        "resultados": resultados,
+    }
 
 
 @app.post("/recursos-premium", response_model=ResultadoOutput)

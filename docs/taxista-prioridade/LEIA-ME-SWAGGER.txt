@@ -20,3 +20,4 @@ Rotas documentadas:
   POST /taxista/relacao             → alias com campo relacao
   PATCH /taxista/{id}/relacao       → altera UM motorista (idempotente, dry_run) — para laço no cliente
   GET  /taxista/listar              → lista motoristas por relação e status (10 por página; todas=true)
+  POST /cofre/status                → quais e-mails já têm o 2FA no cofre da VPS (só booleano)

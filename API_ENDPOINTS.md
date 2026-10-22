@@ -121,6 +121,7 @@ A API aceita strings para `indice`, `headless` e `manter_aberto` (ex.: N8N) e co
 | POST | `/taxista/prioridade/ativar` | Motorista **prioritário** (`taxista_id`) |
 | POST | `/taxista/prioridade/remover` | Motorista **secundário** (remove prioridade) |
 | POST | `/taxista/relacao` | Alias com `relacao`: prioritario \| secundario |
+| POST | `/cofre/status` | Interno (Radar): `{"emails":[...]}` → por e-mail, `no_cofre` true/false (se o segredo 2FA está no cofre da VPS). Nunca devolve o segredo |
 | PATCH | `/taxista/{taxista_id}/relacao` | Altera **um** motorista (idempotente; `dry_run`; devolve diff antes/depois) — para laço no cliente |
 | GET | `/taxista/listar` | Lista motoristas por `relacao` (prioritario \| secundario \| todos) e `status`; 10 por página, `todas=true` percorre tudo |
 | POST | `/relatorio/clientes/solicitar` | Exporta a base de clientes do painel (CSV no S3) |
