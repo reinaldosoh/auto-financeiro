@@ -1535,13 +1535,26 @@ async def relatorio_motoristas_status(report_id: int, session_token: SessionToke
 
 
 JOB_CORRIDAS_TTL_SEG = 2 * 3600
+JOB_CORRIDAS_MAX_PROCESSANDO_SEG = 30 * 60
 JANELA_CORRIDAS_TIMEOUT_SEG = 300
 _jobs_corridas: Dict[str, Dict[str, Any]] = {}
 _tasks_corridas: Dict[str, asyncio.Task] = {}
 
 
 def _limpar_jobs_corridas() -> None:
-    cutoff = time.time() - JOB_CORRIDAS_TTL_SEG
+    agora = time.time()
+    # Job preso em "processing" (3 janelas x 5 min no máximo): encerra como erro, senão o
+    # /solicitar o reaproveita para sempre e o cliente fica consultando o /status sem fim.
+    for job_id, job in list(_jobs_corridas.items()):
+        if job["status"] == "processing" and agora - job["criado_em"] > JOB_CORRIDAS_MAX_PROCESSANDO_SEG:
+            log.warning("job corridas %s preso em processing; encerrando como erro", job_id)
+            task = _tasks_corridas.get(job_id)
+            if task and not task.done():
+                task.cancel()
+            job["status"] = "erro"
+            job["erro"] = "Job de corridas excedeu o tempo máximo sem concluir."
+            job["atualizado_em"] = agora
+    cutoff = agora - JOB_CORRIDAS_TTL_SEG
     for job_id in [j for j, job in _jobs_corridas.items() if job["criado_em"] < cutoff and job["status"] != "processing"]:
         _jobs_corridas.pop(job_id, None)
         _tasks_corridas.pop(job_id, None)
@@ -1676,6 +1689,7 @@ async def relatorio_corridas_solicitar(inp: RelatorioCorridasInput, x_session_to
 
 @app.get("/relatorio/corridas/status/{job_id}")
 async def relatorio_corridas_status(job_id: str, session_token: SessionTokenDep):
+    _limpar_jobs_corridas()
     job = _jobs_corridas.get(job_id)
     if not job:
         raise HTTPException(
