@@ -6,6 +6,7 @@ Rodar: python3 -m pytest test_royalties_cenario01.py -q   (ou python3 test_royal
 from datetime import date
 
 from machine_financeiro_http import (
+    calcular_boleto_ubiz,
     calcular_cenario_01,
     mes_passado_sp,
     parse_centrais,
@@ -127,6 +128,36 @@ def test_calculo_seguro_global_e_avisos():
     assert c["seguro_app_detalhe"]["origem"] == "global" and c["seguro_app"] == 23.5
     assert c["base_royalties"] < 0
     assert any("negativa" in a for a in c["avisos"]) and any("royalty" in a for a in c["avisos"])
+
+
+def test_alfenas_outubro_igual_ao_financeiro():
+    """Conferido com o cálculo manual do financeiro Ubiz (Alfenas, 10/2026): R$ 2.803,44(5)."""
+    dem = parse_demonstrativo(DEMONSTRATIVO_HTML)
+    entradas = {
+        "ganhos_gerais": 126520.10,
+        "taxa_central_pct": 15,
+        "corridas_finalizadas": 8238,
+        "boleto_machine": dem["valor_a_pagar"],
+        "itens_demonstrativo": dem["itens"],
+    }
+    cfg = {"taxa_valor": 20, "taxa_tipo": "percentual", "taxa_seguro_app": 0.15, "taxa_seguro_app_tipo": "fixo",
+           "tarifa_boleto": 3.50, "tarifa_boleto_tipo": "fixo"}
+    c = calcular_cenario_01(entradas, cfg)
+    assert c["saldo_01"] == 18978.01
+    assert c["boleto_ubiz"] == 3739.09            # 8238×0,33 + 3985×0,17 + 206×0,14 + 8073×0,02 + 7465×0,02 + 3,50
+    assert c["boleto_machine"] == 3134.97         # só referência
+    assert c["seguro_app"] == 1239.20             # 8238×0,15 + 3,50
+    assert c["base_royalties"] == 13999.72
+    assert c["royalty"] == 2799.94
+    assert c["valor_final"] == 2803.44            # financeiro arredondou para 2.803,45
+    assert c["avisos"] == []
+
+
+def test_item_desconhecido_usa_valor_machine():
+    itens = [{"descricao": "Corridas finalizadas", "quantidade": 10, "debito": 2.7},
+             {"descricao": "Coisa nova", "quantidade": 2, "debito": 1.0}]
+    b = calcular_boleto_ubiz(itens)
+    assert b["total"] == round(10 * 0.33 + 1.0 + 3.5, 2) and b["avisos"]
 
 
 def test_datas():

@@ -16,18 +16,36 @@ Código: [`machine_financeiro_http.py`](../../machine_financeiro_http.py) (clien
 | Taxas | `GET /bandeira/taxas` (fallback `/bandeira/creditos`), cartões `button.btn-tax` |
 | Boleto da Machine | `POST /demonstrativoMensal/index` `FinCobrancaBandeira[bandeira_id]` + `data_ano_mes` → "Valor a pagar" |
 
-## Fórmula (igual a `webhook-cenario-01` do finance-hub)
+## Fórmula (validada com o financeiro: Alfenas 10/2026)
 
 ```
-saldo_01       = ganhos_gerais × taxa_central%
-boleto_machine = "Valor a pagar" do demonstrativo mensal (dados reais da Machine)
-seguro_app     = corridas_finalizadas × taxa_seguro (cidade > global) + R$ 3,50
-base           = saldo_01 − boleto_machine − seguro_app
-royalty        = base × % da cidade (ou valor fixo)
-valor_final    = royalty + tarifa de boleto global
+saldo_01     = ganhos_gerais × taxa_central%                       126.520,10 × 15% = 18.978,01
+boleto_ubiz  = Σ quantidade do Demonstrativo × tabela Ubiz + 3,50   = 3.739,09
+seguro_app   = corridas_finalizadas × taxa_seguro (0,15) + 3,50    = 1.239,20
+base         = saldo_01 − boleto_ubiz − seguro_app                 = 13.999,72
+royalty      = base × % da cidade (20%)                            = 2.799,94
+valor_final  = royalty + tarifa de boleto (3,50)                   = 2.803,44
 ```
 
-A taxa App (20%, só MAÇANETA) não entra no cenário 01. Ela é devolvida apenas como informação em `entradas.taxas`.
+**O boleto NÃO é o "Valor a pagar" da Machine** (R$ 3.134,97 em Alfenas). A Ubiz usa as
+quantidades do demonstrativo com a própria tabela de preços:
+
+| Item do demonstrativo | Tabela Ubiz |
+|---|---|
+| Corridas finalizadas | 0,33 |
+| Corridas não finalizadas (perdidas/canceladas) | 0,17 |
+| SMS | 0,14 |
+| Validação CPF | 0,14 |
+| Rota exibida durante a estimativa | 0,02 |
+| Rota exibida durante a viagem | 0,02 |
+| Transbordo | 0,25 |
+| Saque Pix | 0,50 |
+| Tarifa de boleto | 3,50 |
+
+Os preços vêm de `TABELA_UBIZ_PADRAO` (`machine_financeiro_http.py`). Preços maiores que zero em
+`empresas.taxa_global_*` no finance-hub (ou `tabela_ubiz` no body) sobrescrevem a tabela. Item sem
+preço na tabela usa o valor da Machine e gera aviso. A Taxa App de 20% (só MAÇANETA) não entra
+no cenário 01.
 
 ## Fluxo da API (todas com `X-API-Key`)
 

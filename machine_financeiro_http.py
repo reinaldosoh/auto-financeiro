@@ -586,16 +586,90 @@ def calcular_seguro_app(corridas_finalizadas: float, cfg: Dict[str, Any]) -> Dic
     return {"valor": valor, "taxa": taxa, "tipo": tipo, "origem": "cidade" if usa_cidade else "global"}
 
 
+# Tabela de preços que a Ubiz cobra das franquias (não é o preço da Machine).
+# Fonte: financeiro Ubiz (05/11/2026). Pode ser sobrescrita por cidade/empresa (cfg["tabela_ubiz"]).
+TABELA_UBIZ_PADRAO: Dict[str, float] = {
+    "corridas_finalizadas": 0.33,
+    "corridas_nao_finalizadas": 0.17,  # perdidas e canceladas
+    "sms": 0.14,
+    "validacao_cpf": 0.14,
+    "rota_estimativa": 0.02,
+    "rota_viagem": 0.02,
+    "transbordo": 0.25,
+    "saque_pix": 0.50,
+    "tarifa_boleto": 3.50,
+}
+
+
+def classificar_item_demonstrativo(descricao: str) -> Optional[str]:
+    d = (descricao or "").lower()
+    if "não finalizada" in d or "nao finalizada" in d or "perdida" in d or "cancelad" in d:
+        return "corridas_nao_finalizadas"
+    if "finalizada" in d:
+        return "corridas_finalizadas"
+    if "estimativa" in d:
+        return "rota_estimativa"
+    if "rota" in d and ("viagem" in d or "corrida" in d):
+        return "rota_viagem"
+    if "cpf" in d:
+        return "validacao_cpf"
+    if "sms" in d:
+        return "sms"
+    if "transbordo" in d:
+        return "transbordo"
+    if "saque" in d or "pix" in d:
+        return "saque_pix"
+    return None
+
+
+def calcular_boleto_ubiz(itens_demonstrativo: List[Dict[str, Any]], tabela: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    """
+    Boleto que a Ubiz considera: QUANTIDADES do Demonstrativo Mensal da Machine × tabela Ubiz
+    + tarifa de boleto. (Conferido com o cálculo manual de Alfenas 10/2026: R$ 3.739,09.)
+    """
+    tab = {**TABELA_UBIZ_PADRAO, **{k: float(v) for k, v in (tabela or {}).items() if v is not None}}
+    linhas, avisos, total = [], [], 0.0
+    for it in itens_demonstrativo or []:
+        if it.get("subtotal") or it.get("quantidade") in (None, ""):
+            continue
+        chave = classificar_item_demonstrativo(it.get("descricao", ""))
+        qtd = float(it["quantidade"])
+        if chave is None:
+            valor = float(it.get("debito") or 0)
+            avisos.append(f"Item do demonstrativo sem preço na tabela Ubiz: '{it.get('descricao')}'. Usado o valor da Machine (R$ {valor:.2f}).")
+            linhas.append({"descricao": it.get("descricao"), "chave": None, "quantidade": qtd, "tarifa": None, "valor": round(valor, 2)})
+        else:
+            valor = qtd * tab[chave]
+            linhas.append({"descricao": it.get("descricao"), "chave": chave, "quantidade": qtd, "tarifa": tab[chave], "valor": round(valor, 2)})
+        total += valor
+    tarifa = tab["tarifa_boleto"]
+    return {"itens": linhas, "subtotal": round(total, 2), "tarifa_boleto": tarifa, "total": round(total + tarifa, 2), "avisos": avisos}
+
+
 def calcular_cenario_01(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
-    entradas: ganhos_gerais, taxa_central_pct, boleto_machine, corridas_finalizadas
+    entradas: ganhos_gerais, taxa_central_pct, corridas_finalizadas,
+              itens_demonstrativo (quantidades da Machine), boleto_machine (só referência)
     cfg: taxa_valor, taxa_tipo (royalty Ubiz da cidade), taxa_seguro_app[_tipo],
-         taxa_seguro_app_global[_tipo], tarifa_boleto, tarifa_boleto_tipo
+         taxa_seguro_app_global[_tipo], tarifa_boleto, tarifa_boleto_tipo, tabela_ubiz
+
+    Regra do financeiro Ubiz:
+      base = ganhos × taxa_central − boleto_ubiz − seguro_app
+      valor_final = base × % da cidade + tarifa de boleto
     """
     avisos: List[str] = []
     ganho = float(entradas["ganhos_gerais"])
     pct_central = float(entradas["taxa_central_pct"])
-    boleto = float(entradas["boleto_machine"])
+    tabela = dict(cfg.get("tabela_ubiz") or {})
+    if cfg.get("tarifa_boleto") is not None and "tarifa_boleto" not in tabela:
+        tabela["tarifa_boleto"] = float(cfg["tarifa_boleto"])
+    if entradas.get("itens_demonstrativo") is not None:
+        boleto_ubiz = calcular_boleto_ubiz(entradas["itens_demonstrativo"], tabela)
+        avisos.extend(boleto_ubiz["avisos"])
+        boleto = boleto_ubiz["total"]
+    else:  # compatibilidade: só o total informado
+        boleto_ubiz = None
+        boleto = float(entradas["boleto_machine"])
 
     saldo_01 = ganho * pct_central / 100.0
     seguro = calcular_seguro_app(float(entradas.get("corridas_finalizadas") or 0), cfg)
@@ -619,7 +693,9 @@ def calcular_cenario_01(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
         "ganhos_gerais": r2(ganho),
         "taxa_central_pct": pct_central,
         "saldo_01": r2(saldo_01),
-        "boleto_machine": r2(boleto),
+        "boleto_ubiz": r2(boleto),
+        "boleto_ubiz_detalhe": boleto_ubiz,
+        "boleto_machine": r2(float(entradas.get("boleto_machine") or 0)),
         "seguro_app": seguro["valor"],
         "seguro_app_detalhe": seguro,
         "total_deducoes": r2(total_deducoes),
@@ -660,6 +736,7 @@ def coletar_cidade(
             "ganhos_gerais": ganhos["ganhos_gerais"],
             "taxa_central_pct": pct,
             "boleto_machine": dem["valor_a_pagar"],
+            "itens_demonstrativo": dem["itens"],
             "corridas_finalizadas": ganhos["corridas_finalizadas"],
         },
     }

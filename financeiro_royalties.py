@@ -111,7 +111,10 @@ class FinanceHub:
             "empresas",
             {
                 "select": "id,email,taxa_seguro_app_global,taxa_seguro_app_global_tipo,"
-                "taxa_global_tarifa_boleto,taxa_global_tarifa_boleto_tipo",
+                "taxa_global_tarifa_boleto,taxa_global_tarifa_boleto_tipo,"
+                "taxa_global_corridas_finalizadas,taxa_global_corridas_nao_finalizadas,"
+                "taxa_global_rota_exibida_estimativa,taxa_global_rota_exibida_viagem,"
+                "taxa_global_validacao_cpf,taxa_global_sms,taxa_global_taxa_saque_pix",
                 "id": f"eq.{empresa_id}",
             },
         )
@@ -146,8 +149,23 @@ class FinanceHub:
         )
 
 
+_MAPA_TABELA_HUB = {
+    "corridas_finalizadas": "taxa_global_corridas_finalizadas",
+    "corridas_nao_finalizadas": "taxa_global_corridas_nao_finalizadas",
+    "rota_estimativa": "taxa_global_rota_exibida_estimativa",
+    "rota_viagem": "taxa_global_rota_exibida_viagem",
+    "validacao_cpf": "taxa_global_validacao_cpf",
+    "sms": "taxa_global_sms",
+    "saque_pix": "taxa_global_taxa_saque_pix",
+    "tarifa_boleto": "taxa_global_tarifa_boleto",
+}
+
+
 def _cfg_de_supabase(cidade: Dict[str, Any], empresa: Dict[str, Any]) -> Dict[str, Any]:
+    # Preços > 0 cadastrados no finance-hub sobrescrevem a tabela padrão; transbordo fica no padrão.
+    tabela = {k: float(empresa[c]) for k, c in _MAPA_TABELA_HUB.items() if empresa.get(c)}
     return {
+        "tabela_ubiz": tabela,
         "taxa_valor": cidade.get("taxa_valor"),
         "taxa_tipo": cidade.get("taxa_tipo"),
         "taxa_seguro_app": cidade.get("taxa_seguro_app"),
@@ -179,8 +197,11 @@ class CfgCidade(BaseModel):
     taxa_seguro_app_tipo: Literal["percentual", "fixo"] = "fixo"
     taxa_seguro_app_global: float = 0
     taxa_seguro_app_global_tipo: Literal["percentual", "fixo"] = "fixo"
-    tarifa_boleto: float = 0
+    tarifa_boleto: float = 3.50
     tarifa_boleto_tipo: Literal["percentual", "fixo"] = "fixo"
+    tabela_ubiz: Optional[Dict[str, float]] = Field(
+        None, description="Preços Ubiz por item do demonstrativo (padrão: TABELA_UBIZ_PADRAO)"
+    )
 
 
 class RodarInput(BaseModel):
