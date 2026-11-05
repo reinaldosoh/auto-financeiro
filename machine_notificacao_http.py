@@ -128,6 +128,31 @@ def _new_session(email: str) -> tuple[str, requests.Session]:
     return token, http
 
 
+def registrar_sessao(email: str, http: requests.Session) -> str:
+    """Registra uma sessão HTTP já autenticada (ex.: login em 2 etapas) e devolve o token."""
+    token = str(uuid.uuid4())
+    with _sessions_lock:
+        _cleanup_sessions()
+        _sessions[token] = {"email": email, "http": http, "created_at": _now()}
+    return token
+
+
+def novo_http_painel() -> requests.Session:
+    """requests.Session com os mesmos headers de `_new_session`, sem registrar token."""
+    http = requests.Session()
+    http.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+    )
+    return http
+
+
 def get_session(token: str) -> Optional[requests.Session]:
     with _sessions_lock:
         _cleanup_sessions()

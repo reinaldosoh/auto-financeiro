@@ -8,6 +8,8 @@ Documentação interativa: **`GET {BASE_URL}/docs`** (Swagger UI).
 
 **Integração categorias de tarifa (listar / ordem / exibir no app):** OpenAPI + Swagger em [`docs/categorias-tarifa/`](docs/categorias-tarifa/) — [`GUIA_INTEGRACAO_CATEGORIAS_VPS.md`](docs/categorias-tarifa/GUIA_INTEGRACAO_CATEGORIAS_VPS.md)
 
+**Cobrança de royalties (login da matriz + 2FA manual, cenário 01):** [`docs/royalties/README.md`](docs/royalties/README.md) — `POST /financeiro/login`, `/financeiro/login/2fa`, `/financeiro/royalties/rodar`, `GET /financeiro/royalties/status/{job_id}`
+
 **Integração prioridade do motorista (ativar / remover / listar / PATCH):** OpenAPI em [`docs/taxista-prioridade/`](docs/taxista-prioridade/) — [`GUIA_INTEGRACAO_TAXISTA_PRIORIDADE_VPS.md`](docs/taxista-prioridade/GUIA_INTEGRACAO_TAXISTA_PRIORIDADE_VPS.md)
 
 ---

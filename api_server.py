@@ -196,6 +196,11 @@ app = FastAPI(
 
 app.add_middleware(AuthenticatedBodyLimit)
 
+# Cobrança de royalties (financeiro Ubiz) — login da matriz com 2FA manual, sem navegador.
+from financeiro_royalties import registrar_rotas as _registrar_rotas_financeiro  # noqa: E402
+
+_registrar_rotas_financeiro(app)
+
 executor = ThreadPoolExecutor(
     max_workers=int(os.environ.get("MACHINE_EXECUTOR_WORKERS", "3") or "3")
 )
