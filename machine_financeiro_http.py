@@ -646,7 +646,7 @@ def calcular_boleto_ubiz(itens_demonstrativo: List[Dict[str, Any]], tabela: Opti
     return {"itens": linhas, "subtotal": round(total, 2), "tarifa_boleto": tarifa, "total": round(total + tarifa, 2), "avisos": avisos}
 
 
-def calcular_cenario_01(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+def calcular_cenario(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     entradas: ganhos_gerais, taxa_central_pct, corridas_finalizadas,
               itens_demonstrativo (quantidades da Machine), boleto_machine (só referência)
@@ -654,12 +654,16 @@ def calcular_cenario_01(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
          taxa_seguro_app_global[_tipo], tarifa_boleto, tarifa_boleto_tipo, tabela_ubiz
 
     Regra do financeiro Ubiz:
-      base = ganhos × taxa_central − boleto_ubiz − seguro_app
+      cenário 01 (taxa central em %):  base = ganhos × taxa_central% − boleto_ubiz − seguro_app
+      cenário 02 (taxa central fixa):  base = corridas_finalizadas × R$ fixo − boleto_ubiz
       valor_final = base × % da cidade + tarifa de boleto
     """
     avisos: List[str] = []
+    cenario = entradas.get("cenario") or "cenario_01"
     ganho = float(entradas["ganhos_gerais"])
-    pct_central = float(entradas["taxa_central_pct"])
+    pct_central = entradas.get("taxa_central_pct")
+    fixo_central = entradas.get("taxa_central_fixo")
+    corridas = float(entradas.get("corridas_finalizadas") or 0)
     tabela = dict(cfg.get("tabela_ubiz") or {})
     if cfg.get("tarifa_boleto") is not None and "tarifa_boleto" not in tabela:
         tabela["tarifa_boleto"] = float(cfg["tarifa_boleto"])
@@ -671,10 +675,21 @@ def calcular_cenario_01(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
         boleto_ubiz = None
         boleto = float(entradas["boleto_machine"])
 
-    saldo_01 = ganho * pct_central / 100.0
-    seguro = calcular_seguro_app(float(entradas.get("corridas_finalizadas") or 0), cfg)
-    if seguro["origem"] == "nao_configurada":
-        avisos.append("Seguro app sem taxa configurada (cidade nem global): descontado R$ 0,00.")
+    if cenario == "cenario_02":
+        # Cenário 2: taxa da central FIXA por corrida → corridas finalizadas × R$ fixo.
+        saldo_01 = corridas * float(fixo_central)
+    else:
+        saldo_01 = ganho * float(pct_central) / 100.0
+
+    descontar_seguro = cfg.get("descontar_seguro")
+    if descontar_seguro is None:
+        descontar_seguro = cenario == "cenario_01"  # no cenário 2 o financeiro não desconta seguro
+    if descontar_seguro:
+        seguro = calcular_seguro_app(corridas, cfg)
+        if seguro["origem"] == "nao_configurada":
+            avisos.append("Seguro app sem taxa configurada (cidade nem global): descontado R$ 0,00.")
+    else:
+        seguro = {"valor": 0.0, "taxa": 0.0, "tipo": "fixo", "origem": "nao_descontado_no_cenario"}
     total_deducoes = boleto + seguro["valor"]
     base = saldo_01 - total_deducoes
     if base < 0:
@@ -690,8 +705,11 @@ def calcular_cenario_01(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
 
     r2 = lambda v: round(v, 2)  # noqa: E731
     return {
+        "cenario": cenario,
         "ganhos_gerais": r2(ganho),
-        "taxa_central_pct": pct_central,
+        "corridas_finalizadas": int(corridas),
+        "taxa_central_pct": float(pct_central) if pct_central is not None else None,
+        "taxa_central_fixo": float(fixo_central) if fixo_central is not None else None,
         "saldo_01": r2(saldo_01),
         "boleto_ubiz": r2(boleto),
         "boleto_ubiz_detalhe": boleto_ubiz,
@@ -726,17 +744,28 @@ def coletar_cidade(
     ganhos = obter_ganhos_mes(http, ano_mes, bandeira_id=bandeira_id)
     taxas = obter_taxas_bandeira(http)
     pct = taxas["taxa_central"].get("percentual")
-    if pct is None:
-        raise ErroFinanceiro("taxa_central_sem_percentual", "Taxa da central não é percentual; cenário 01 não se aplica.")
+    fixo = taxas["taxa_central"].get("valor_fixo")
+    if pct is not None:
+        cenario = "cenario_01"  # % sobre o transacionado
+    elif fixo:
+        cenario = "cenario_02"  # R$ fixo por corrida finalizada
+    else:
+        raise ErroFinanceiro("taxa_central_invalida", "Não consegui ler a Taxa da central (nem % nem R$).")
     return {
         "ganhos": ganhos,
         "taxas": taxas,
         "demonstrativo": dem,
         "entradas_calculo": {
             "ganhos_gerais": ganhos["ganhos_gerais"],
+            "cenario": cenario,
             "taxa_central_pct": pct,
+            "taxa_central_fixo": fixo if pct is None else None,
             "boleto_machine": dem["valor_a_pagar"],
             "itens_demonstrativo": dem["itens"],
             "corridas_finalizadas": ganhos["corridas_finalizadas"],
         },
     }
+
+
+# compatibilidade com o nome antigo
+calcular_cenario_01 = calcular_cenario

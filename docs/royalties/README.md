@@ -1,4 +1,4 @@
-# Cobrança de royalties (Cenário 01) via HTTP
+# Cobrança de royalties (Cenários 1 e 2) via HTTP
 
 Reproduz, sem navegador, o que o financeiro faz à mão no painel da Machine (vídeo "COBRANÇA ROYALTIES - CENÁRIO 1"):
 
@@ -26,6 +26,21 @@ base         = saldo_01 − boleto_ubiz − seguro_app                 = 13.999,
 royalty      = base × % da cidade (20%)                            = 2.799,94
 valor_final  = royalty + tarifa de boleto (3,50)                   = 2.803,44
 ```
+
+### Cenário 2 (taxa da central FIXA por corrida — ex.: Passos, R$ 2,50)
+
+Vídeo "COBRANÇA ROYALTIES - CENÁRIO 2": Corridas › Consultar corridas › filtro do mês, status
+Finalizada → quantidade × taxa fixa da central − valor da tecnologia (boleto) → × % da Ubiz.
+
+```
+saldo        = corridas_finalizadas × R$ fixo da central
+base         = saldo − boleto_ubiz            (sem seguro app; forçar com cfg descontar_seguro=true)
+valor_final  = base × % da cidade + tarifa de boleto
+```
+
+O cenário é detectado sozinho pela tela de taxas: Taxa da central em **%** → cenário 1;
+em **R$** → cenário 2. A quantidade de corridas finalizadas vem do Painel (mês passado),
+a mesma do filtro de Consultar corridas.
 
 **O boleto NÃO é o "Valor a pagar" da Machine** (R$ 3.134,97 em Alfenas). A Ubiz usa as
 quantidades do demonstrativo com a própria tabela de preços:

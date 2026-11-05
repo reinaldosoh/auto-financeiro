@@ -38,7 +38,7 @@ button:disabled{opacity:.5;cursor:default}.msg{margin-top:10px;font-size:14px}.o
 table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}th,td{text-align:right;padding:6px;border-bottom:1px solid var(--bd)}
 th:first-child,td:first-child{text-align:left}.hidden{display:none}pre{white-space:pre-wrap;font-size:12px;background:var(--bg);padding:10px;border-radius:7px;max-height:300px;overflow:auto}
 </style></head><body><main>
-<h1>Cobrança de royalties · Cenário 01</h1><p class="sub">Teste da API da VPS. Nada é salvo: credenciais ficam só nesta aba.</p>
+<h1>Cobrança de royalties · Cenários 1 e 2</h1><p class="sub">Teste da API da VPS. Nada é salvo: credenciais ficam só nesta aba.</p>
 
 <section id="s1"><h2>1. Conexão e login da matriz</h2>
 <div class="row"><div><label>URL da VPS</label><input id="vps"></div>
@@ -55,7 +55,7 @@ th:first-child,td:first-child{text-align:left}.hidden{display:none}pre{white-spa
 <section id="s3" class="hidden"><h2>3. Rodar</h2>
 <div class="row"><div><label>Competência</label><input id="mes" type="month"></div>
 <div><label>Royalty Ubiz da cidade (%) – usado no teste</label><input id="pct" type="number" step="0.01" value="10"></div></div>
-<div class="row"><div><label>Seguro app por corrida (R$)</label><input id="seg" type="number" step="0.01" value="0.15"></div>
+<div class="row"><div><label>Seguro app por corrida (R$) – só cenário 1</label><input id="seg" type="number" step="0.01" value="0.15"></div>
 <div><label>Tarifa de boleto (R$)</label><input id="tar" type="number" step="0.01" value="3.50"></div></div>
 <label>Cidades <a href="#" id="todas">marcar todas</a> · <a href="#" id="nenhuma">nenhuma</a></label><div id="lista" class="lista"></div>
 <button id="bRodar">Rodar (simulação, não grava)</button><div id="m3" class="msg"></div>
@@ -93,7 +93,7 @@ $('nenhuma').onclick=e=>{e.preventDefault();document.querySelectorAll('#lista in
 function render(j){$('json').textContent=JSON.stringify(j,null,2);$('tab').classList.remove('hidden');
   $('tab').querySelector('tbody').innerHTML=j.cidades.map(c=>{const k=c.calculo||{},nome=(document.querySelector(`#lista input[value="${c.bandeira_id}"]`)||{}).parentElement;
    const n=nome?nome.textContent.split('#')[0].trim():c.bandeira_id;const e=c.erro?`<span class="err">${c.erro.mensagem}</span>`:c.status;
-   return `<tr><td>${n}</td><td>${e}${(c.avisos||[]).length?'<br><small>'+c.avisos.join('<br>')+'</small>':''}</td><td>${brl(k.ganhos_gerais)}</td><td>${k.taxa_central_pct??'—'}%</td><td>${brl(k.saldo_01)}</td><td>${brl(k.boleto_ubiz)}<br><small style="color:#667085">${brl(k.boleto_machine)}</small></td><td>${brl(k.seguro_app)}</td><td>${brl(k.base_royalties)}</td><td>${brl(k.royalty)}</td><td><b>${brl(k.valor_final)}</b></td></tr>`}).join('');
+   return `<tr><td>${n}</td><td>${e}${(c.avisos||[]).length?'<br><small>'+c.avisos.join('<br>')+'</small>':''}</td><td>${brl(k.ganhos_gerais)}</td><td>${k.cenario==='cenario_02'?(brl(k.taxa_central_fixo)+' × '+(k.corridas_finalizadas||0).toLocaleString('pt-BR')+' corr.<br><small>cenário 2</small>'):((k.taxa_central_pct??'—')+'%<br><small>cenário 1</small>')}</td><td>${brl(k.saldo_01)}</td><td>${brl(k.boleto_ubiz)}<br><small style="color:#667085">${brl(k.boleto_machine)}</small></td><td>${brl(k.seguro_app)}</td><td>${brl(k.base_royalties)}</td><td>${brl(k.royalty)}</td><td><b>${brl(k.valor_final)}</b></td></tr>`}).join('');
   msg($('m3'),`${j.status} · ${j.progresso.concluidas}/${j.progresso.total} cidades · erros ${j.progresso.com_erro} · total royalties ${brl(j.totais.valor_final)}`,j.status!=='erro')}
 $('bRodar').onclick=async()=>{const ids=[...document.querySelectorAll('#lista input:checked')].map(i=>i.value);
   if(!ids.length)return msg($('m3'),'Marque ao menos uma cidade.');$('bRodar').disabled=true;

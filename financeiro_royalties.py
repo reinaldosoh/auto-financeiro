@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from machine_financeiro_http import (
     ErroFinanceiro,
-    calcular_cenario_01,
+    calcular_cenario,
     coletar_cidade,
     concluir_login_2fa,
     iniciar_login,
@@ -99,7 +99,7 @@ class FinanceHub:
         params = {
             "select": "id,nome,empresa_id,bandeira_id,cenario_cobranca,taxa_valor,taxa_tipo,"
             "taxa_seguro_app,taxa_seguro_app_tipo",
-            "cenario_cobranca": "cs.{cenario_01}",
+            "cenario_cobranca": "ov.{cenario_01,cenario_02}",
             "bandeira_id": "not.is.null",
         }
         if self.empresa_id:
@@ -199,6 +199,9 @@ class CfgCidade(BaseModel):
     taxa_seguro_app_global_tipo: Literal["percentual", "fixo"] = "fixo"
     tarifa_boleto: float = 3.50
     tarifa_boleto_tipo: Literal["percentual", "fixo"] = "fixo"
+    descontar_seguro: Optional[bool] = Field(
+        None, description="Padrão: desconta no cenário 01, não desconta no cenário 02"
+    )
     tabela_ubiz: Optional[Dict[str, float]] = Field(
         None, description="Preços Ubiz por item do demonstrativo (padrão: TABELA_UBIZ_PADRAO)"
     )
@@ -268,7 +271,7 @@ def _processar_cidade(job: Dict[str, Any], item: Dict[str, Any], http, hub: Fina
         raise dem_erro
     coleta = coletar_cidade(http, item["bandeira_id"], job["ano_mes"], demonstrativo=item.pop("_dem", None))
     item["entradas"] = coleta
-    calc = calcular_cenario_01(coleta["entradas_calculo"], item["cfg"])
+    calc = calcular_cenario(coleta["entradas_calculo"], item["cfg"])
     item["calculo"] = calc
     item["avisos"] = coleta["ganhos"].get("avisos", []) + calc["avisos"]
     item["status"] = "calculado"
@@ -277,8 +280,8 @@ def _processar_cidade(job: Dict[str, Any], item: Dict[str, Any], http, hub: Fina
         if not job["dry_run"]:
             item["avisos"].append("Cidade sem cadastro no finance-hub: não gravado.")
         return
-    if not job["sobrescrever"] and hub.cobranca_existe(item["cidade_id"], "cenario_01", job["periodo_rotulo"]):
-        item["avisos"].append("Já existe cobrança cenario_01 deste mês: não gravado (use sobrescrever).")
+    if not job["sobrescrever"] and hub.cobranca_existe(item["cidade_id"], calc["cenario"], job["periodo_rotulo"]):
+        item["avisos"].append(f"Já existe cobrança {calc['cenario']} deste mês: não gravado (use sobrescrever).")
         return
 
     agora = datetime.now(timezone.utc).isoformat()
@@ -307,7 +310,7 @@ def _processar_cidade(job: Dict[str, Any], item: Dict[str, Any], http, hub: Fina
         })
     hub.inserir_cobranca({
         **base,
-        "cenario": "cenario_01",
+        "cenario": calc["cenario"],
         "taxa_central": calc["saldo_01"],
         "valor_pago_motorista": round(calc["ganhos_gerais"] - calc["saldo_01"], 2),
         "valor_bruto": calc["ganhos_gerais"],
@@ -445,7 +448,7 @@ async def financeiro_royalties_rodar(inp: RodarInput, x_session_token: str = Hea
     alvos = inp.bandeira_ids or list(por_bandeira.keys())
     if not alvos:
         raise HTTPException(400, {"sucesso": False, "codigo": "sem_cidades",
-                                  "mensagem": "Nenhuma cidade: envie bandeira_ids ou cadastre bandeira_id + cenario_01 no finance-hub."})
+                                  "mensagem": "Nenhuma cidade: envie bandeira_ids ou cadastre bandeira_id + cenario_01/02 no finance-hub."})
 
     itens = []
     for bid in alvos:

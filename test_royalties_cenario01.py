@@ -7,6 +7,7 @@ from datetime import date
 
 from machine_financeiro_http import (
     calcular_boleto_ubiz,
+    calcular_cenario,
     calcular_cenario_01,
     mes_passado_sp,
     parse_centrais,
@@ -158,6 +159,27 @@ def test_item_desconhecido_usa_valor_machine():
              {"descricao": "Coisa nova", "quantidade": 2, "debito": 1.0}]
     b = calcular_boleto_ubiz(itens)
     assert b["total"] == round(10 * 0.33 + 1.0 + 3.5, 2) and b["avisos"]
+
+
+def test_cenario_02_taxa_fixa_por_corrida():
+    """Passos: Taxa da central R$2,50 fixa → corridas × 2,50 − boleto Ubiz, × % Ubiz, + tarifa. Sem seguro."""
+    t = parse_taxas(TAXAS_HTML.replace("15% - R$5,00", "R$2,50"))
+    assert t["taxa_central"]["percentual"] is None and t["taxa_central"]["valor_fixo"] == 2.5
+    itens = [{"descricao": "Corridas finalizadas", "quantidade": 16322, "debito": 0},
+             {"descricao": "Corridas não finalizadas", "quantidade": 4000, "debito": 0}]
+    entradas = {"cenario": "cenario_02", "ganhos_gerais": 0, "taxa_central_fixo": 2.5,
+                "corridas_finalizadas": 16322, "itens_demonstrativo": itens, "boleto_machine": 0}
+    c = calcular_cenario(entradas, {"taxa_valor": 20, "taxa_seguro_app": 0.5, "taxa_seguro_app_tipo": "fixo",
+                                    "tarifa_boleto": 3.5})
+    assert c["saldo_01"] == 40805.00                         # 16.322 × 2,50
+    assert c["boleto_ubiz"] == round(16322 * 0.33 + 4000 * 0.17 + 3.5, 2)
+    assert c["seguro_app"] == 0                              # cenário 2 não desconta seguro
+    assert c["base_royalties"] == round(40805 - c["boleto_ubiz"], 2)
+    assert c["valor_final"] == round(c["base_royalties"] * 0.2 + 3.5, 2)
+    # dá para forçar o desconto do seguro, se o financeiro pedir
+    c2 = calcular_cenario(entradas, {"taxa_valor": 20, "taxa_seguro_app": 0.5, "taxa_seguro_app_tipo": "fixo",
+                                     "tarifa_boleto": 3.5, "descontar_seguro": True})
+    assert c2["seguro_app"] == round(16322 * 0.5 + 3.5, 2)
 
 
 def test_datas():
