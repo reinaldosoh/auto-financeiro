@@ -95,11 +95,11 @@ class FinanceHub:
             raise RuntimeError(f"Supabase {tabela}: HTTP {r.status_code} {r.text[:200]}")
         return r.json()
 
-    def cidades_cenario_01(self) -> List[Dict[str, Any]]:
+    def cidades_do_cenario(self, cenario: str) -> List[Dict[str, Any]]:
         params = {
             "select": "id,nome,empresa_id,bandeira_id,cenario_cobranca,taxa_valor,taxa_tipo,"
             "taxa_seguro_app,taxa_seguro_app_tipo",
-            "cenario_cobranca": "ov.{cenario_01,cenario_02}",
+            "cenario_cobranca": f"cs.{{{cenario}}}",
             "bandeira_id": "not.is.null",
         }
         if self.empresa_id:
@@ -208,6 +208,9 @@ class CfgCidade(BaseModel):
 
 
 class RodarInput(BaseModel):
+    cenario: Literal["cenario_01", "cenario_02"] = Field(
+        ..., description="Uma rodada = um cenário. cenario_01: % sobre o transacionado; cenario_02: R$ fixo por corrida"
+    )
     ano_mes: Optional[str] = Field(None, description="AAAA-MM; padrão = mês passado (São Paulo)")
     bandeira_ids: Optional[List[str]] = None
     dry_run: bool = True
@@ -246,6 +249,7 @@ def _job_publico(job: Dict[str, Any]) -> Dict[str, Any]:
         "job_id": job["job_id"],
         "status": job["status"],
         "erro": job["erro"],
+        "cenario": job["cenario"],
         "ano_mes": job["ano_mes"],
         "periodo_rotulo": job["periodo_rotulo"],
         "dry_run": job["dry_run"],
@@ -269,7 +273,9 @@ def _processar_cidade(job: Dict[str, Any], item: Dict[str, Any], http, hub: Fina
     dem_erro = item.pop("_dem_erro", None)
     if dem_erro:
         raise dem_erro
-    coleta = coletar_cidade(http, item["bandeira_id"], job["ano_mes"], demonstrativo=item.pop("_dem", None))
+    coleta = coletar_cidade(
+        http, item["bandeira_id"], job["ano_mes"], demonstrativo=item.pop("_dem", None), cenario=job["cenario"]
+    )
     item["entradas"] = coleta
     calc = calcular_cenario(coleta["entradas_calculo"], item["cfg"])
     item["calculo"] = calc
@@ -436,7 +442,7 @@ async def financeiro_royalties_rodar(inp: RodarInput, x_session_token: str = Hea
 
     loop = asyncio.get_event_loop()
     try:
-        cidades_db: List[Dict[str, Any]] = await loop.run_in_executor(None, hub.cidades_cenario_01) if hub.ativo else []
+        cidades_db: List[Dict[str, Any]] = await loop.run_in_executor(None, lambda: hub.cidades_do_cenario(inp.cenario)) if hub.ativo else []
         empresas: Dict[str, Dict[str, Any]] = {}
         for c in cidades_db:
             if c["empresa_id"] not in empresas:
@@ -448,7 +454,7 @@ async def financeiro_royalties_rodar(inp: RodarInput, x_session_token: str = Hea
     alvos = inp.bandeira_ids or list(por_bandeira.keys())
     if not alvos:
         raise HTTPException(400, {"sucesso": False, "codigo": "sem_cidades",
-                                  "mensagem": "Nenhuma cidade: envie bandeira_ids ou cadastre bandeira_id + cenario_01/02 no finance-hub."})
+                                  "mensagem": "Nenhuma cidade: envie bandeira_ids ou cadastre bandeira_id + este cenário em cenario_cobranca no finance-hub."})
 
     itens = []
     for bid in alvos:
@@ -486,6 +492,7 @@ async def financeiro_royalties_rodar(inp: RodarInput, x_session_token: str = Hea
             "job_id": str(uuid.uuid4()),
             "session_token": x_session_token,
             "email": get_session_email(x_session_token) or "",
+            "cenario": inp.cenario,
             "ano_mes": ano_mes,
             "periodo_rotulo": periodo_rotulo(ano_mes),
             "dry_run": inp.dry_run,

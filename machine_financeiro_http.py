@@ -628,6 +628,12 @@ def obter_demonstrativo(http: requests.Session, bandeira_id: str, ano_mes: str) 
 
 # ───────────────────────── cálculo (cenário 01) ─────────────────────────
 
+CENARIOS = ("cenario_01", "cenario_02")
+NOMES_CENARIO = {
+    "cenario_01": "cenário 1 (% sobre o transacionado)",
+    "cenario_02": "cenário 2 (R$ fixo por corrida)",
+}
+
 
 def _aplicar(base: float, valor: float, tipo: str) -> float:
     return base * (valor / 100.0) if (tipo or "percentual") == "percentual" else valor
@@ -793,6 +799,7 @@ def coletar_cidade(
     ano_mes: str,
     trocar: bool = True,
     demonstrativo: Optional[Dict[str, Any]] = None,
+    cenario: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Busca na Machine tudo que o cálculo precisa, para uma cidade.
@@ -803,6 +810,22 @@ def coletar_cidade(
         trocar_central(http, bandeira_id)
     ganhos = obter_ganhos_mes(http, ano_mes, bandeira_id=bandeira_id)
     taxas = obter_taxas_bandeira(http)
+    pct = taxas["taxa_central"].get("percentual")
+    fixo = taxas["taxa_central"].get("valor_fixo")
+    if pct is not None:
+        cenario_machine = "cenario_01"  # % sobre o transacionado
+    elif fixo:
+        cenario_machine = "cenario_02"  # R$ fixo por corrida finalizada
+    else:
+        raise ErroFinanceiro("taxa_central_invalida", "Não consegui ler a Taxa da central (nem % nem R$).")
+    if cenario and cenario != cenario_machine:
+        texto = taxas["taxa_central"].get("texto") or ""
+        raise ErroFinanceiro(
+            "cidade_fora_do_cenario",
+            f"Cidade não é do {NOMES_CENARIO[cenario]}: a Taxa da central na Machine é '{texto}' "
+            f"({NOMES_CENARIO[cenario_machine]}). Rode esta cidade no {NOMES_CENARIO[cenario_machine]}.",
+        )
+    cenario = cenario or cenario_machine
     # Quantidade de corridas: mesmo método do financeiro (Consultar corridas, status Finalizada).
     try:
         filtro = contar_corridas_finalizadas(http, ano_mes)
@@ -819,14 +842,6 @@ def coletar_cidade(
         filtro = {"erro": str(exc)}
         corridas = ganhos["corridas_finalizadas"]
         ganhos["avisos"].append(f"Filtro de Consultar corridas falhou ({exc}); usada a quantidade do Painel.")
-    pct = taxas["taxa_central"].get("percentual")
-    fixo = taxas["taxa_central"].get("valor_fixo")
-    if pct is not None:
-        cenario = "cenario_01"  # % sobre o transacionado
-    elif fixo:
-        cenario = "cenario_02"  # R$ fixo por corrida finalizada
-    else:
-        raise ErroFinanceiro("taxa_central_invalida", "Não consegui ler a Taxa da central (nem % nem R$).")
     return {
         "ganhos": ganhos,
         "taxas": taxas,

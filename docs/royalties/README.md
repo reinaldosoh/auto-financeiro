@@ -38,8 +38,10 @@ base         = saldo − boleto_ubiz            (sem seguro app; forçar com cfg
 valor_final  = base × % da cidade + tarifa de boleto
 ```
 
-O cenário é detectado sozinho pela tela de taxas: Taxa da central em **%** → cenário 1;
-em **R$** → cenário 2. A quantidade de corridas finalizadas vem de **Consultar corridas**
+**Uma rodada = um cenário**, escolhido por quem roda (`"cenario": "cenario_01" | "cenario_02"`,
+obrigatório). No Hub, cada cenário é um grupo de cidades (`cidades.cenario_cobranca`). A tela de
+taxas da Machine serve de trava: Taxa da central em **%** = cenário 1, em **R$** = cenário 2. Uma
+cidade rodada no cenário errado sai com erro `cidade_fora_do_cenario`, nunca com valor calculado. A quantidade de corridas finalizadas vem de **Consultar corridas**
 (dia 1 00:00 ao último dia 23:59, status Finalizada), igual ao financeiro. O Painel pode dar
 alguns a menos (Passos 10/2026: Painel 5.096, filtro 5.098 → R$ 1.072,56 conferido).
 
@@ -71,9 +73,9 @@ no cenário 01.
    - Código errado: HTTP 400 `codigo_invalido` (até 5 tentativas). Passados 5 min: HTTP 410 `login_expirado`.
 3. **`POST /financeiro/royalties/rodar`** (header `X-Session-Token`)
    ```json
-   { "ano_mes": "2026-10", "bandeira_ids": ["2796"], "dry_run": true }
+   { "cenario": "cenario_01", "ano_mes": "2026-10", "bandeira_ids": ["2796"], "dry_run": true }
    ```
-   - Sem `bandeira_ids`, usa todas as cidades do finance-hub com `cenario_01` e `bandeira_id`.
+   - Sem `bandeira_ids`, usa as cidades do finance-hub daquele cenário (`cenario_cobranca`) com `bandeira_id`.
    - Sem Supabase, envie `config_padrao` ou `config_por_bandeira` (`taxa_valor`, `taxa_tipo`, `taxa_seguro_app[_tipo]`, `tarifa_boleto[_tipo]`).
    - `dry_run:false` grava em `cobrancas` (`cenario_01`, e `seguro_app` se a cidade tiver esse cenário) e marca `rodou_mes_atual`. Não duplica o mês, a menos que se passe `sobrescrever:true`.
 4. **`GET /financeiro/royalties/status/{job_id}`** (mesmo `X-Session-Token`) → progresso, `totais` e, por cidade, `entradas` (ganhos, taxas, demonstrativo), `calculo` e `avisos`.

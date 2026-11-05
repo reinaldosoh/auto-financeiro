@@ -53,9 +53,13 @@ th:first-child,td:first-child{text-align:left}.hidden{display:none}pre{white-spa
 <br><button id="b2fa">Confirmar código</button><div id="m2" class="msg"></div></section>
 
 <section id="s3" class="hidden"><h2>3. Rodar</h2>
+<label>Cenário da rodada (uma rodada = um cenário)</label>
+<select id="cenario"><option value="">Selecione o cenário…</option>
+<option value="cenario_01">Cenário 1 – % sobre o transacionado (ex.: Alfenas 15%)</option>
+<option value="cenario_02">Cenário 2 – R$ fixo por corrida (ex.: Passos R$ 2,50)</option></select>
 <div class="row"><div><label>Competência</label><input id="mes" type="month"></div>
 <div><label>Royalty Ubiz da cidade (%) – usado no teste</label><input id="pct" type="number" step="0.01" value="10"></div></div>
-<div class="row"><div><label>Seguro app por corrida (R$) – só cenário 1</label><input id="seg" type="number" step="0.01" value="0.15"></div>
+<div class="row"><div id="campoSeg"><label>Seguro app por corrida (R$) – só cenário 1</label><input id="seg" type="number" step="0.01" value="0.15"></div>
 <div><label>Tarifa de boleto (R$)</label><input id="tar" type="number" step="0.01" value="3.50"></div></div>
 <label>Cidades <a href="#" id="todas">marcar todas</a> · <a href="#" id="nenhuma">nenhuma</a></label><div id="lista" class="lista"></div>
 <button id="bRodar">Rodar (simulação, não grava)</button><div id="m3" class="msg"></div>
@@ -94,11 +98,15 @@ function render(j){$('json').textContent=JSON.stringify(j,null,2);$('tab').class
   $('tab').querySelector('tbody').innerHTML=j.cidades.map(c=>{const k=c.calculo||{},nome=(document.querySelector(`#lista input[value="${c.bandeira_id}"]`)||{}).parentElement;
    const n=nome?nome.textContent.split('#')[0].trim():c.bandeira_id;const e=c.erro?`<span class="err">${c.erro.mensagem}</span>`:c.status;
    return `<tr><td>${n}</td><td>${e}${(c.avisos||[]).length?'<br><small>'+c.avisos.join('<br>')+'</small>':''}</td><td>${brl(k.ganhos_gerais)}</td><td>${k.cenario==='cenario_02'?(brl(k.taxa_central_fixo)+' × '+(k.corridas_finalizadas||0).toLocaleString('pt-BR')+' corr.<br><small>cenário 2</small>'):((k.taxa_central_pct??'—')+'%<br><small>cenário 1</small>')}</td><td>${brl(k.saldo_01)}</td><td>${brl(k.boleto_ubiz)}<br><small style="color:#667085">${brl(k.boleto_machine)}</small></td><td>${brl(k.seguro_app)}</td><td>${brl(k.base_royalties)}</td><td>${brl(k.royalty)}</td><td><b>${brl(k.valor_final)}</b></td></tr>`}).join('');
-  msg($('m3'),`${j.status} · ${j.progresso.concluidas}/${j.progresso.total} cidades · erros ${j.progresso.com_erro} · total royalties ${brl(j.totais.valor_final)}`,j.status!=='erro')}
+  msg($('m3'),`${j.cenario==='cenario_02'?'Cenário 2':'Cenário 1'} · ${j.status} · ${j.progresso.concluidas}/${j.progresso.total} cidades · erros ${j.progresso.com_erro} · total royalties ${brl(j.totais.valor_final)}`,j.status!=='erro')}
+$('cenario').onchange=()=>{$('campoSeg').style.visibility=$('cenario').value==='cenario_02'?'hidden':'visible';
+  $('bRodar').textContent=$('cenario').value?('Rodar '+($('cenario').value==='cenario_02'?'cenário 2':'cenário 1')+' (simulação, não grava)'):'Rodar (simulação, não grava)'};
 $('bRodar').onclick=async()=>{const ids=[...document.querySelectorAll('#lista input:checked')].map(i=>i.value);
+  const cenario=$('cenario').value;
+  if(!cenario)return msg($('m3'),'Escolha o cenário da rodada.');
   if(!ids.length)return msg($('m3'),'Marque ao menos uma cidade.');$('bRodar').disabled=true;
   const cfg={taxa_valor:+$('pct').value,taxa_tipo:'percentual',taxa_seguro_app:+$('seg').value,taxa_seguro_app_tipo:'fixo',tarifa_boleto:+$('tar').value,tarifa_boleto_tipo:'fixo'};
-  try{let j=await api('POST','/financeiro/royalties/rodar',{ano_mes:$('mes').value,bandeira_ids:ids,dry_run:true,config_padrao:cfg});render(j);
+  try{let j=await api('POST','/financeiro/royalties/rodar',{cenario,ano_mes:$('mes').value,bandeira_ids:ids,dry_run:true,config_padrao:cfg});render(j);
     while(j.status==='processing'){await new Promise(r=>setTimeout(r,3000));j=await api('GET','/financeiro/royalties/status/'+j.job_id);render(j)}}
   catch(e){msg($('m3'),e.message)}finally{$('bRodar').disabled=false}};
 </script></body></html>"""
