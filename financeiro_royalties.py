@@ -35,6 +35,7 @@ from machine_financeiro_http import (
     iniciar_login,
     listar_centrais,
     mes_passado_sp,
+    obter_demonstrativo,
     periodo_rotulo,
     trocar_central,
     validar_ano_mes,
@@ -233,7 +234,7 @@ def _job_publico(job: Dict[str, Any]) -> Dict[str, Any]:
             "royalty": round(sum(c["calculo"]["royalty"] for c in ok), 2),
             "valor_final": round(sum(c["calculo"]["valor_final"] for c in ok), 2),
         },
-        "cidades": cidades,
+        "cidades": [{k: v for k, v in c.items() if not k.startswith("_")} for c in cidades],
         "criado_em": int(job["criado_em"]),
         "atualizado_em": int(job["atualizado_em"]),
     }
@@ -241,7 +242,10 @@ def _job_publico(job: Dict[str, Any]) -> Dict[str, Any]:
 
 def _processar_cidade(job: Dict[str, Any], item: Dict[str, Any], http, hub: FinanceHub) -> None:
     item["status"] = "processando"
-    coleta = coletar_cidade(http, item["bandeira_id"], job["ano_mes"])
+    dem_erro = item.pop("_dem_erro", None)
+    if dem_erro:
+        raise dem_erro
+    coleta = coletar_cidade(http, item["bandeira_id"], job["ano_mes"], demonstrativo=item.pop("_dem", None))
     item["entradas"] = coleta
     calc = calcular_cenario_01(coleta["entradas_calculo"], item["cfg"])
     item["calculo"] = calc
@@ -304,11 +308,24 @@ def _executar_job(job: Dict[str, Any], http, hub: FinanceHub) -> None:
             central_original = next((c["bandeira_id"] for c in listar_centrais(http) if c["atual"]), None)
         except Exception as exc:
             log.warning("job financeiro %s: central original desconhecida: %s", job["job_id"], exc)
+        # 1ª passada: demonstrativos (boleto Machine) enquanto a sessão está na matriz.
+        for item in job["cidades"]:
+            try:
+                item["_dem"] = obter_demonstrativo(http, item["bandeira_id"], job["ano_mes"])
+            except ErroFinanceiro as exc:
+                if exc.codigo == "sessao_expirada":
+                    raise
+                item["_dem_erro"] = exc
+            except Exception as exc:
+                item["_dem_erro"] = ErroFinanceiro("demonstrativo_falhou", str(exc))
+            job["atualizado_em"] = time.time()
+        # 2ª passada: por cidade, troca de central → ganhos → taxas → cálculo.
         for item in job["cidades"]:
             try:
                 _processar_cidade(job, item, http, hub)
             except ErroFinanceiro as exc:
-                item.update(status="erro", erro={"codigo": exc.codigo, "mensagem": str(exc)})
+                item.update(status="erro", erro={"codigo": exc.codigo, "mensagem": str(exc),
+                                                 "diagnostico": getattr(exc, "diagnostico", None)})
                 if exc.codigo == "sessao_expirada":
                     raise
             except Exception as exc:
@@ -322,6 +339,8 @@ def _executar_job(job: Dict[str, Any], http, hub: FinanceHub) -> None:
         job["status"] = "erro"
         job["erro"] = str(exc)
         for item in job["cidades"]:
+            item.pop("_dem", None)
+            item.pop("_dem_erro", None)
             if item["status"] in ("aguardando", "processando"):
                 item.update(status="erro", erro={"codigo": "interrompido", "mensagem": str(exc)})
     finally:

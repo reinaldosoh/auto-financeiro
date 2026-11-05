@@ -503,21 +503,56 @@ def parse_demonstrativo(html: str) -> Dict[str, Any]:
     }
 
 
+def _diagnostico_html(r: requests.Response) -> Dict[str, Any]:
+    html = r.text or ""
+    titulo = re.search(r"<title>(.*?)</title>", html, re.S | re.I)
+    return {
+        "http": r.status_code,
+        "url": (r.url or "").replace(BASE_URL, ""),
+        "titulo": _texto(titulo.group(1)) if titulo else "",
+        "tamanho": len(html),
+        "tem_tabela_items": bool(re.search(r"class=\"[^\"]*\bitems\b", html)),
+        "tem_valor_total": "valor_total" in html,
+        "tem_seletor_bandeira": "FinCobrancaBandeira_bandeira_id" in html,
+        "tem_data_ano_mes": "data_ano_mes" in html,
+        "trecho": _texto(html[html.find("<body"):])[:400] if "<body" in html else _texto(html)[:400],
+    }
+
+
 def obter_demonstrativo(http: requests.Session, bandeira_id: str, ano_mes: str) -> Dict[str, Any]:
+    """
+    "Boleto da Machine". Funciona com a sessão na central da MATRIZ (seletor de bandeiras).
+    Tenta POST do formulário (como o painel) e, se não vier tabela, GET com os mesmos parâmetros.
+    """
     validar_ano_mes(ano_mes)
     r_get = _get_pagina(http, "/demonstrativoMensal/index")
     form = re.search(r"<form[^>]*action=\"[^\"]*demonstrativoMensal/index\"[^>]*>(.*?)</form>", r_get.text, re.S)
     dados = _inputs_ocultos(form.group(1) if form else "")
     dados += [("FinCobrancaBandeira[bandeira_id]", str(bandeira_id)), ("data_ano_mes", ano_mes)]
+    tentativas = []
     r = http.post(
         BASE_URL + "/demonstrativoMensal/index",
         data=dados,
         headers={**_HEADERS_PAGINA, "Referer": BASE_URL + "/demonstrativoMensal/index"},
         timeout=60,
     )
-    if _sessao_expirada(r):
-        raise ErroFinanceiro("sessao_expirada", "Sessão da Machine expirou. Faça login novamente.", 401)
+    tentativas.append(("post", r))
     dem = parse_demonstrativo(r.text)
+    if dem["valor_a_pagar"] is None:
+        r2 = _get_pagina(http, "/demonstrativoMensal/index", params=dict(dados))
+        tentativas.append(("get", r2))
+        dem2 = parse_demonstrativo(r2.text)
+        if dem2["valor_a_pagar"] is not None:
+            dem = dem2
+    if _sessao_expirada(tentativas[-1][1]):
+        raise ErroFinanceiro("sessao_expirada", "Sessão da Machine expirou. Faça login novamente.", 401)
+    if dem["valor_a_pagar"] is None:
+        diag = {m: _diagnostico_html(resp) for m, resp in tentativas}
+        diag["get_inicial"] = _diagnostico_html(r_get)
+        log.warning("demonstrativo vazio bandeira=%s %s diag=%s", bandeira_id, ano_mes, diag)
+        erro = ErroFinanceiro("demonstrativo_vazio", f"Demonstrativo sem total para {bandeira_id} em {ano_mes}.")
+        erro.diagnostico = diag  # type: ignore[attr-defined]
+        raise erro
     if dem["bandeira_id"] and dem["bandeira_id"] != str(bandeira_id):
         raise ErroFinanceiro(
             "demonstrativo_cidade_errada",
@@ -528,8 +563,6 @@ def obter_demonstrativo(http: requests.Session, bandeira_id: str, ano_mes: str) 
             "demonstrativo_sem_competencia",
             f"Competência {ano_mes} indisponível no demonstrativo (veio {dem['ano_mes']}).",
         )
-    if dem["valor_a_pagar"] is None:
-        raise ErroFinanceiro("demonstrativo_vazio", f"Demonstrativo sem total para {bandeira_id} em {ano_mes}.")
     return dem
 
 
@@ -600,13 +633,22 @@ def calcular_cenario_01(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
     }
 
 
-def coletar_cidade(http: requests.Session, bandeira_id: str, ano_mes: str, trocar: bool = True) -> Dict[str, Any]:
-    """Busca na Machine tudo que o cálculo precisa, para uma cidade."""
+def coletar_cidade(
+    http: requests.Session,
+    bandeira_id: str,
+    ano_mes: str,
+    trocar: bool = True,
+    demonstrativo: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Busca na Machine tudo que o cálculo precisa, para uma cidade.
+    `demonstrativo` deve ser lido ANTES da troca de central (a tela só funciona na matriz).
+    """
+    dem = demonstrativo if demonstrativo is not None else obter_demonstrativo(http, bandeira_id, ano_mes)
     if trocar:
         trocar_central(http, bandeira_id)
     ganhos = obter_ganhos_mes(http, ano_mes, bandeira_id=bandeira_id)
     taxas = obter_taxas_bandeira(http)
-    dem = obter_demonstrativo(http, bandeira_id, ano_mes)
     pct = taxas["taxa_central"].get("percentual")
     if pct is None:
         raise ErroFinanceiro("taxa_central_sem_percentual", "Taxa da central não é percentual; cenário 01 não se aplica.")
