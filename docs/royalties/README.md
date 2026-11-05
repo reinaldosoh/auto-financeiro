@@ -1,4 +1,4 @@
-# Cobrança de royalties (Cenários 1 e 2) via HTTP
+# Cobrança de royalties (Cenários 1 a 4) via HTTP
 
 Reproduz, sem navegador, o que o financeiro faz à mão no painel da Machine (vídeo "COBRANÇA ROYALTIES - CENÁRIO 1"):
 
@@ -44,6 +44,34 @@ taxas da Machine serve de trava: Taxa da central em **%** = cenário 1, em **R$*
 cidade rodada no cenário errado sai com erro `cidade_fora_do_cenario`, nunca com valor calculado. A quantidade de corridas finalizadas vem de **Consultar corridas**
 (dia 1 00:00 ao último dia 23:59, status Finalizada), igual ao financeiro. O Painel pode dar
 alguns a menos (Passos 10/2026: Painel 5.096, filtro 5.098 → R$ 1.072,56 conferido).
+
+### Cenário 3 (entradas − saídas do extrato — ex.: Mariana)
+
+```
+entradas = recarga via Central + recarga via Pix + cupons + desafios + indicações + cashback
+         + cartão no app BRUTO (Transações com cartão: soma do "Valor líquido da bandeira")
+         + eTicket (Vouchers e tickets por motoristas: soma da coluna Ticket)
+saídas   = saque via Central + saque via Pix + seguro app (corridas finalizadas × taxa + 3,50)
+royalty  = (entradas − saídas) × % da Ubiz          (sem tarifa de boleto; somar_tarifa_boleto=true liga)
+```
+O "Cartão no App" e o "eTicket" do extrato **não** entram: são o líquido creditado ao motorista.
+
+### Cenário 4 (taxa da central + taxa do cartão)
+
+```
+taxa do cartão = Transações com cartão (líquido da bandeira) − "Cartão no App" do extrato
+royalty        = (Taxa da central do extrato + taxa do cartão) × % da Ubiz
+```
+
+### Rotas Machine dos cenários 3 e 4 (todas HTTP, sem navegador)
+
+| Dado | Rota | Central |
+|---|---|---|
+| Extrato (abas C/B/R/S) | `GET /machinePay/obterExtratoMotoristas?tipo=C\|B\|R\|S&periodo=LM` (ou `CT` + `data_ini/data_fim` em `aaaa-mm-dd`) → `response.estatisticas` | cidade |
+| Transações com cartão | `POST /cartao/exportTransacaoExcel` (`PagamentoSolicitacaoFilterForm`, `bandeira_corrida_id`, situação paga+disputa+chargeback, `export`) → CSV | matriz |
+| Vouchers e tickets | `POST /financeiro/voucherTicketTaxista/index` (`TaxistaFilterForm[first_date/last_date]`, `export`) → CSV | cidade |
+
+Os CSVs dizem UTF-8 mas vêm em Latin-1 (`;`). O export de transações não devolve meses muito antigos.
 
 **O boleto NÃO é o "Valor a pagar" da Machine** (R$ 3.134,97 em Alfenas). A Ubiz usa as
 quantidades do demonstrativo com a própria tabela de preços:

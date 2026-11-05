@@ -182,6 +182,67 @@ def test_cenario_02_taxa_fixa_por_corrida():
     assert c2["seguro_app"] == round(16322 * 0.5 + 3.5, 2)
 
 
+class _RespCSV:
+    def __init__(self, texto, ct="text/csv; charset=UTF-8"):
+        self.content = texto.encode("latin-1")
+        self.headers = {"Content-Type": ct}
+        self.status_code = 200
+        self.url = "https://cloud.taximachine.com.br/x"
+        self.text = texto
+
+
+def test_csv_cartao_latin1_soma_liquido_bandeira():
+    from unittest import mock
+    from machine_financeiro_http import obter_cartao_liquido
+    csv = ("Nº OS;Bandeira;Categoria;Bandeira da corrida;Situação do Pagamento;Solicitação;Passageiro;"
+           "Telefone do passageiro;Motorista;Valor da corrida;Valor líquido da bandeira;Valor líquido do motorista;"
+           "Data esperada do pagamento;ID Transação Zoop\r\n"
+           "1;Ubiz Car Brasil;X;Ubiz Car - Mariana;Paga;01/10/2026;Júlia;+55;Romário;36,60;34,770000000;0;01/10/2026;a\r\n"
+           "2;Ubiz Car Brasil;X;Ubiz Car - Mariana;Em disputa;02/10/2026;Ana;+55;Carlos;1.036,90;1.035,050000000;0;02/10/2026;b\r\n")
+    class H:
+        def post(self, *a, **k):
+            return _RespCSV(csv)
+    r = obter_cartao_liquido(H(), "1875", "3085", "2026-10")
+    assert r["total"] == 1069.82 and r["linhas"] == 2
+    assert r["situacoes"] == {"Paga": 1, "Em disputa": 1}
+
+
+def test_csv_vouchers_ticket_ponto_decimal():
+    from machine_financeiro_http import obter_vouchers_tickets
+    csv = "Motorista;VTR;Voucher;Ticket\r\nAGELSON;2;;20.80\r\nAlessandro;6;;288.47\r\nRyan;;;1151.51\r\n"
+    class H:
+        def post(self, *a, **k):
+            return _RespCSV(csv)
+    r = obter_vouchers_tickets(H(), "2026-02")
+    assert r["ticket"] == 1460.78 and r["motoristas"] == 3
+
+
+def test_cenario_03_mariana_video():
+    """Números do vídeo (Mariana, fev/2026). Seguro: 1.000 corridas × 0,15 + 3,50 só para o teste."""
+    extrato = {"recarga_central": 544.39, "recarga_pix": 58898.68, "cupom": 10.0, "desafios": 0, "indicacoes": 3.0,
+               "cashback": 0, "saque_central": 0, "saque_pix": 1307.88,
+               "cartao": 21840.77, "ticket": 2741.91, "tx_central": 84195.05}  # cartao/ticket do extrato NÃO entram
+    e = {"cenario": "cenario_03", "extrato": extrato, "cartao_liquido": 25353.02, "eticket": 2915.16,
+         "corridas_finalizadas": 1000}
+    c = calcular_cenario(e, {"taxa_valor": 10, "taxa_seguro_app": 0.15, "taxa_seguro_app_tipo": "fixo", "tarifa_boleto": 3.5})
+    assert c["total_entradas"] == round(544.39 + 58898.68 + 10 + 3 + 25353.02 + 2915.16, 2) == 87724.25
+    assert c["seguro_app"] == 153.50
+    assert c["total_saidas"] == round(1307.88 + 153.50, 2)
+    assert c["base_royalties"] == round(87724.25 - 1461.38, 2)
+    assert c["royalty"] == round(c["base_royalties"] * 0.10, 2)
+    assert c["tarifa_boleto"] == 0 and c["valor_final"] == c["royalty"]   # sem tarifa por padrão
+
+
+def test_cenario_04_taxa_central_mais_taxa_cartao():
+    e = {"cenario": "cenario_04", "extrato": {"tx_central": 50000.0, "cartao": 59184.0}, "cartao_liquido": 76143.0}
+    c = calcular_cenario(e, {"taxa_valor": 10})
+    assert c["taxa_cartao"] == 16959.0                         # 76.143 − 59.184 (vídeo)
+    assert c["base_royalties"] == 66959.0
+    assert c["valor_final"] == 6695.9
+    c2 = calcular_cenario(e, {"taxa_valor": 10, "tarifa_boleto": 3.5, "somar_tarifa_boleto": True})
+    assert c2["valor_final"] == 6699.4
+
+
 def test_datas():
     assert mes_passado_sp(date(2026, 11, 5)) == "2026-10"
     assert mes_passado_sp(date(2027, 1, 3)) == "2026-12"

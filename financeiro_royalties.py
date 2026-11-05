@@ -30,6 +30,8 @@ from pydantic import BaseModel, Field, field_validator
 from machine_financeiro_http import (
     ErroFinanceiro,
     calcular_cenario,
+    coletar_cidade_extrato,
+    obter_cartao_liquido,
     coletar_cidade,
     concluir_login_2fa,
     iniciar_login,
@@ -200,6 +202,9 @@ class CfgCidade(BaseModel):
     taxa_seguro_app_global_tipo: Literal["percentual", "fixo"] = "fixo"
     tarifa_boleto: float = 3.50
     tarifa_boleto_tipo: Literal["percentual", "fixo"] = "fixo"
+    somar_tarifa_boleto: Optional[bool] = Field(
+        None, description="Cenários 3 e 4: somar a tarifa de boleto no final (padrão: não)"
+    )
     descontar_seguro: Optional[bool] = Field(
         None, description="Padrão: desconta no cenário 01, não desconta no cenário 02"
     )
@@ -209,8 +214,9 @@ class CfgCidade(BaseModel):
 
 
 class RodarInput(BaseModel):
-    cenario: Literal["cenario_01", "cenario_02"] = Field(
-        ..., description="Uma rodada = um cenário. cenario_01: % sobre o transacionado; cenario_02: R$ fixo por corrida"
+    cenario: Literal["cenario_01", "cenario_02", "cenario_03", "cenario_04"] = Field(
+        ..., description="Uma rodada = um cenário. 01: % sobre o transacionado; 02: R$ fixo por corrida; "
+        "03: entradas − saídas do extrato; 04: taxa da central + taxa do cartão"
     )
     ano_mes: Optional[str] = Field(None, description="AAAA-MM; padrão = mês passado (São Paulo)")
     bandeira_ids: Optional[List[str]] = None
@@ -276,15 +282,23 @@ def _processar_cidade(job: Dict[str, Any], item: Dict[str, Any], http, hub: Fina
     if dem_erro:
         raise dem_erro
     tempo_dem = item.pop("_tempo_dem", None)
-    coleta = coletar_cidade(
-        http, item["bandeira_id"], job["ano_mes"], demonstrativo=item.pop("_dem", None), cenario=job["cenario"]
-    )
-    coleta["tempos_s"]["demonstrativo"] = tempo_dem
+    if job["cenario"] in ("cenario_03", "cenario_04"):
+        coleta = coletar_cidade_extrato(
+            http, item["bandeira_id"], job["ano_mes"], job["cenario"], cartao=item.pop("_dem")
+        )
+        coleta["tempos_s"]["cartao"] = tempo_dem
+        avisos_coleta = coleta["avisos"]
+    else:
+        coleta = coletar_cidade(
+            http, item["bandeira_id"], job["ano_mes"], demonstrativo=item.pop("_dem", None), cenario=job["cenario"]
+        )
+        coleta["tempos_s"]["demonstrativo"] = tempo_dem
+        avisos_coleta = coleta["ganhos"].get("avisos", [])
     item["tempos_s"] = coleta["tempos_s"]
     item["entradas"] = coleta
     calc = calcular_cenario(coleta["entradas_calculo"], item["cfg"])
     item["calculo"] = calc
-    item["avisos"] = coleta["ganhos"].get("avisos", []) + calc["avisos"]
+    item["avisos"] = avisos_coleta + calc["avisos"]
     item["status"] = "calculado"
 
     if job["dry_run"] or not item.get("cidade_id"):
@@ -304,9 +318,9 @@ def _processar_cidade(job: Dict[str, Any], item: Dict[str, Any], http, hub: Fina
         "extraido_em": agora,
         "status_pagamento": "pendente",
     }
-    if "seguro_app" in (item.get("cenarios") or []) and calc["seguro_app"] > 0:
+    if "seguro_app" in (item.get("cenarios") or []) and calc.get("seguro_app", 0) > 0:
         seg = calc["seguro_app_detalhe"]
-        corridas = coleta["entradas_calculo"]["corridas_finalizadas"]
+        corridas = coleta["entradas_calculo"].get("corridas_finalizadas", 0)
         hub.inserir_cobranca({
             **base,
             "cenario": "seguro_app",
@@ -323,8 +337,8 @@ def _processar_cidade(job: Dict[str, Any], item: Dict[str, Any], http, hub: Fina
         **base,
         "cenario": calc["cenario"],
         "taxa_central": calc["saldo_01"],
-        "valor_pago_motorista": round(calc["ganhos_gerais"] - calc["saldo_01"], 2),
-        "valor_bruto": calc["ganhos_gerais"],
+        "valor_pago_motorista": round(calc["ganhos_gerais"] - calc["saldo_01"], 2) if "ganhos_gerais" in calc else 0,
+        "valor_bruto": calc.get("ganhos_gerais", calc.get("valor_bruto", calc["base_royalties"])),
         "taxa_valor": calc["taxa_cidade"],
         "taxa_tipo": calc["taxa_cidade_tipo"],
         "valor_taxa_aplicada": calc["royalty"],
@@ -343,12 +357,15 @@ def _executar_job(job: Dict[str, Any], http, hub: FinanceHub) -> None:
         campos = campos_demonstrativo(http)  # 1 GET: formulário do demonstrativo + central atual (matriz)
         central_original = next((c["bandeira_id"] for c in campos["centrais"] if c["atual"]), None)
         job["tempos_s"]["preparo"] = round(time.time() - t0, 2)
-        # 1ª passada: demonstrativos (boleto Machine) enquanto a sessão está na matriz.
+        # 1ª passada, com a sessão na matriz: demonstrativos (cenários 1/2) ou transações de cartão (3/4).
         t0 = time.time()
         for item in job["cidades"]:
             ti = time.time()
             try:
-                item["_dem"] = obter_demonstrativo(http, item["bandeira_id"], job["ano_mes"], campos=campos)
+                if job["cenario"] in ("cenario_03", "cenario_04"):
+                    item["_dem"] = obter_cartao_liquido(http, central_original or "", item["bandeira_id"], job["ano_mes"])
+                else:
+                    item["_dem"] = obter_demonstrativo(http, item["bandeira_id"], job["ano_mes"], campos=campos)
             except ErroFinanceiro as exc:
                 if exc.codigo == "sessao_expirada":
                     raise

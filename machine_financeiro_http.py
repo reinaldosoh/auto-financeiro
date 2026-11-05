@@ -685,10 +685,12 @@ def obter_demonstrativo(
 
 # ───────────────────────── cálculo (cenário 01) ─────────────────────────
 
-CENARIOS = ("cenario_01", "cenario_02")
+CENARIOS = ("cenario_01", "cenario_02", "cenario_03", "cenario_04")
 NOMES_CENARIO = {
     "cenario_01": "cenário 1 (% sobre o transacionado)",
     "cenario_02": "cenário 2 (R$ fixo por corrida)",
+    "cenario_03": "cenário 3 (entradas − saídas do extrato)",
+    "cenario_04": "cenário 4 (taxa da central + taxa do cartão)",
 }
 
 
@@ -770,6 +772,15 @@ def calcular_boleto_ubiz(itens_demonstrativo: List[Dict[str, Any]], tabela: Opti
 
 
 def calcular_cenario(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    cenario = entradas.get("cenario") or "cenario_01"
+    if cenario == "cenario_03":
+        return calcular_cenario_03(entradas, cfg)
+    if cenario == "cenario_04":
+        return calcular_cenario_04(entradas, cfg)
+    return _calcular_cenario_01_02(entradas, cfg)
+
+
+def _calcular_cenario_01_02(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     entradas: ganhos_gerais, taxa_central_pct, corridas_finalizadas,
               itens_demonstrativo (quantidades da Machine), boleto_machine (só referência)
@@ -895,7 +906,7 @@ def coletar_cidade(
         cenario_machine = "cenario_02"  # R$ fixo por corrida finalizada
     else:
         raise ErroFinanceiro("taxa_central_invalida", "Não consegui ler a Taxa da central (nem % nem R$).")
-    if cenario and cenario != cenario_machine:
+    if cenario in ("cenario_01", "cenario_02") and cenario != cenario_machine:
         texto = taxas["taxa_central"].get("texto") or ""
         raise ErroFinanceiro(
             "cidade_fora_do_cenario",
@@ -947,6 +958,307 @@ def coletar_cidade(
             "itens_demonstrativo": dem["itens"],
             "corridas_finalizadas": corridas,
         },
+    }
+
+
+# ═════════════════════════ cenários 3 e 4 (extrato, cartão, vouchers) ═════════════════════════
+
+
+def _csv_linhas(resp: requests.Response) -> List[List[str]]:
+    """CSVs da Machine dizem UTF-8 mas vêm em Latin-1; separador ';'."""
+    bruto = resp.content or b""
+    try:
+        texto = bruto.decode("utf-8")
+    except UnicodeDecodeError:
+        texto = bruto.decode("latin-1")
+    return [l.split(";") for l in texto.strip().splitlines() if l.strip()]
+
+
+def _coluna(cab: List[str], *nomes: str) -> int:
+    norm = [re.sub(r"\s+", " ", c).strip().lower() for c in cab]
+    for n in nomes:
+        if n.lower() in norm:
+            return norm.index(n.lower())
+    raise ErroFinanceiro("csv_sem_coluna", f"CSV da Machine sem a coluna {nomes[0]!r} (colunas: {cab}).")
+
+
+EXTRATO_ABAS = {"C": "corridas", "B": "beneficios", "R": "recargas", "S": "saques"}
+
+
+def obter_extrato(http: requests.Session, ano_mes: str, hoje: Optional[date] = None) -> Dict[str, Any]:
+    """
+    Financeiro › Créditos › Extrato (central ATIVA). Uma chamada por aba, cada uma já traz os totais
+    em response.estatisticas: Corridas (tx_central, cartao, cupom, ticket...), Benefícios (desafios,
+    indicacoes, cashback), Recargas (recarga_central, recarga_pix), Saques (saque_central, saque_pix).
+    """
+    ano, mes = validar_ano_mes(ano_mes)
+    if ano_mes == mes_passado_sp(hoje):
+        periodo, ini, fim = "LM", "", ""
+    else:
+        periodo, ini, fim = "CT", f"{ano:04d}-{mes:02d}-01", f"{ano:04d}-{mes:02d}-{monthrange(ano, mes)[1]:02d}"
+    totais: Dict[str, float] = {}
+    por_aba: Dict[str, Dict[str, float]] = {}
+    for tipo, nome in EXTRATO_ABAS.items():
+        params = {
+            "tipo": tipo, "subtipo": "tipo", "periodo": periodo, "data_ini": ini, "data_fim": fim,
+            "taxista_id": "", "taxista_nome": "", "empresa_id": "0", "empresa_nome": "", "solicitacao_id": "",
+            "categoria_id": "0", "tipo_pagamento_id": "0", "cliente_nome": "", "report_id": "", "subfiltros": "",
+            "pageSize": "1", "pageNumber": "1",
+        }
+        r = http.get(BASE_URL + "/machinePay/obterExtratoMotoristas", params=params,
+                     headers={"X-Requested-With": "XMLHttpRequest", "Referer": BASE_URL + "/machinePay/extrato"},
+                     timeout=60)
+        if _sessao_expirada(r):
+            raise ErroFinanceiro("sessao_expirada", "Sessão da Machine expirou. Faça login novamente.", 401)
+        data = _parse_json_response(r)
+        if not data.get("success"):
+            raise ErroFinanceiro("extrato_falhou", data.get("message") or f"Extrato ({nome}) recusado pela Machine.")
+        est = (data.get("response") or {}).get("estatisticas") or {}
+        aba = {k: parse_numero_br(v) for k, v in est.items() if isinstance(v, str) and "R$" in v}
+        por_aba[nome] = {k: v for k, v in aba.items() if v}
+        for k, v in aba.items():
+            if v and not totais.get(k):
+                totais[k] = v
+    periodo_txt = (((data.get("response") or {}).get("filtros") or {}).get("periodo") or {}).get("valor")
+    return {"totais": totais, "por_aba": por_aba, "periodo": periodo_txt}
+
+
+def obter_cartao_liquido(http: requests.Session, bandeira_matriz: str, bandeira_corrida: str, ano_mes: str,
+                         hoje: Optional[date] = None) -> Dict[str, Any]:
+    """
+    Financeiro › Cartão › Transações (pela MATRIZ, filtrando "Bandeira da corrida"), situações Paga +
+    Em disputa + Chargeback (sem Recusada/Estornada) → exporta CSV → soma "Valor líquido da bandeira".
+    """
+    ano, mes = validar_ano_mes(ano_mes)
+    ini, fim = f"01/{mes:02d}/{ano}", f"{monthrange(ano, mes)[1]:02d}/{mes:02d}/{ano}"
+    F = "PagamentoSolicitacaoFilterForm"
+    dados = [
+        (f"{F}[solicitacao_id]", ""),
+        (f"{F}[periodo]", "mes_passado" if ano_mes == mes_passado_sp(hoje) else "personalizado"),
+        (f"{F}[data_inicial]", ini), ("data_inicial2", ini), (f"{F}[data_final]", fim), ("data_final2", fim),
+        (f"{F}[bandeira_chamada_id]", str(bandeira_matriz)), (f"{F}[bandeira_corrida_id]", str(bandeira_corrida)),
+        (f"{F}[nomeTaxista]", ""), (f"{F}[situacao]", ""),
+        (f"{F}[situacao][]", "paga"), (f"{F}[situacao][]", "disputa"), (f"{F}[situacao][]", "chargeback"),
+        ("export", ""),
+    ]
+    r = http.post(BASE_URL + "/cartao/exportTransacaoExcel", data=dados,
+                  headers={**_HEADERS_PAGINA, "Referer": BASE_URL + "/cartao/transacao"}, timeout=180)
+    if _sessao_expirada(r):
+        raise ErroFinanceiro("sessao_expirada", "Sessão da Machine expirou. Faça login novamente.", 401)
+    if "csv" not in (r.headers.get("Content-Type") or "").lower():
+        raise ErroFinanceiro("cartao_export_falhou", f"Exportação de transações não devolveu CSV (HTTP {r.status_code}).")
+    linhas = _csv_linhas(r)
+    if not linhas:
+        return {"total": 0.0, "linhas": 0, "situacoes": {}, "valor_corridas": 0.0}
+    cab, corpo = linhas[0], linhas[1:]
+    i_liq = _coluna(cab, "Valor líquido da bandeira")
+    i_val = _coluna(cab, "Valor da corrida")
+    i_sit = _coluna(cab, "Situação do Pagamento")
+    i_ban = _coluna(cab, "Bandeira da corrida")
+    total = valor = 0.0
+    situacoes: Dict[str, int] = {}
+    bandeiras: Dict[str, int] = {}
+    for c in corpo:
+        if len(c) <= max(i_liq, i_val, i_sit):
+            continue
+        total += parse_numero_br(c[i_liq])
+        valor += parse_numero_br(c[i_val])
+        situacoes[c[i_sit]] = situacoes.get(c[i_sit], 0) + 1
+        bandeiras[c[i_ban]] = bandeiras.get(c[i_ban], 0) + 1
+    return {"total": round(total, 2), "linhas": len(corpo), "situacoes": situacoes,
+            "valor_corridas": round(valor, 2), "bandeiras_da_corrida": bandeiras}
+
+
+def obter_vouchers_tickets(http: requests.Session, ano_mes: str) -> Dict[str, Any]:
+    """Financeiro › Contas a pagar › Vouchers e tickets por motoristas (central ATIVA) → CSV → soma Ticket."""
+    ano, mes = validar_ano_mes(ano_mes)
+    dados = {
+        "TaxistaFilterForm[first_date]": f"01/{mes:02d}/{ano}",
+        "TaxistaFilterForm[last_date]": f"{monthrange(ano, mes)[1]:02d}/{mes:02d}/{ano}",
+        "TaxistaFilterForm[nome]": "", "TaxistaFilterForm[vtr]": "", "export": "",
+    }
+    r = http.post(BASE_URL + "/financeiro/voucherTicketTaxista/index", data=dados,
+                  headers={**_HEADERS_PAGINA, "Referer": BASE_URL + "/financeiro/voucherTicketTaxista/index"},
+                  timeout=120)
+    if _sessao_expirada(r):
+        raise ErroFinanceiro("sessao_expirada", "Sessão da Machine expirou. Faça login novamente.", 401)
+    if "csv" not in (r.headers.get("Content-Type") or "").lower():
+        raise ErroFinanceiro("vouchers_export_falhou", f"Exportação de vouchers não devolveu CSV (HTTP {r.status_code}).")
+    linhas = _csv_linhas(r)
+    if len(linhas) <= 1:
+        return {"ticket": 0.0, "voucher": 0.0, "motoristas": 0}
+    cab, corpo = linhas[0], linhas[1:]
+    i_t, i_v = _coluna(cab, "Ticket"), _coluna(cab, "Voucher")
+    ticket = sum(parse_numero_br(c[i_t]) for c in corpo if len(c) > i_t)
+    voucher = sum(parse_numero_br(c[i_v]) for c in corpo if len(c) > i_v)
+    return {"ticket": round(ticket, 2), "voucher": round(voucher, 2), "motoristas": len(corpo)}
+
+
+def calcular_cenario_03(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Cenário 3 (vídeo "COBRANÇA ROYALTIES - CENÁRIO 3"):
+      entradas = recarga via Central + recarga via Pix + cupons + desafios + indicações + cashback
+                 + cartão no app BRUTO (soma do "Valor líquido da bandeira" das transações)
+                 + eTicket (soma da coluna Ticket em Vouchers e tickets por motoristas)
+      saídas   = saque via Central + saque via Pix + seguro app
+      royalty  = (entradas − saídas) × % da Ubiz
+    O cartão no app e o eTicket do extrato NÃO entram (são o líquido creditado ao motorista).
+    """
+    ext = entradas["extrato"]
+    g = lambda k: float(ext.get(k) or 0)  # noqa: E731
+    itens_entrada = [
+        ("Recarga via Central", g("recarga_central")),
+        ("Recarga via Pix", g("recarga_pix")),
+        ("Cupons", g("cupom")),
+        ("Desafios", g("desafios")),
+        ("Indicações", g("indicacoes")),
+        ("Cashback e bônus", g("cashback")),
+        ("Cartão no app (transações, líquido da bandeira)", float(entradas["cartao_liquido"])),
+        ("eTicket (vouchers e tickets por motoristas)", float(entradas["eticket"])),
+    ]
+    avisos: List[str] = []
+    seguro = calcular_seguro_app(float(entradas.get("corridas_finalizadas") or 0), cfg)
+    if seguro["origem"] == "nao_configurada":
+        avisos.append("Seguro app sem taxa configurada: descontado R$ 0,00.")
+    itens_saida = [("Saque via Central", g("saque_central")), ("Saque via Pix", g("saque_pix")),
+                   ("Seguro app", seguro["valor"])]
+    total_ent = sum(v for _, v in itens_entrada)
+    total_sai = sum(v for _, v in itens_saida)
+    base = total_ent - total_sai
+    return _fechar_royalty("cenario_03", base, cfg, avisos, {
+        "entradas": [{"item": n, "valor": round(v, 2)} for n, v in itens_entrada],
+        "saidas": [{"item": n, "valor": round(v, 2)} for n, v in itens_saida],
+        "total_entradas": round(total_ent, 2),
+        "total_saidas": round(total_sai, 2),
+        "seguro_app": seguro["valor"],
+        "seguro_app_detalhe": seguro,
+        "valor_bruto": round(total_ent, 2),
+    })
+
+
+def calcular_cenario_04(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Cenário 4 (vídeo "COBRANÇA ROYALTIES - CENÁRIO 4"):
+      taxa do cartão = transações (líquido da bandeira) − "Cartão no App" do extrato
+      royalty        = (Taxa da central do extrato + taxa do cartão) × % da Ubiz
+    """
+    ext = entradas["extrato"]
+    tx_central = float(ext.get("tx_central") or 0)
+    cartao_extrato = float(ext.get("cartao") or 0)
+    cartao_liq = float(entradas["cartao_liquido"])
+    taxa_cartao = cartao_liq - cartao_extrato
+    avisos: List[str] = []
+    if taxa_cartao < 0:
+        avisos.append("Cartão: transações menores que o 'Cartão no App' do extrato (taxa do cartão negativa).")
+    base = tx_central + taxa_cartao
+    return _fechar_royalty("cenario_04", base, cfg, avisos, {
+        "taxa_central_extrato": round(tx_central, 2),
+        "cartao_transacoes": round(cartao_liq, 2),
+        "cartao_no_app_extrato": round(cartao_extrato, 2),
+        "taxa_cartao": round(taxa_cartao, 2),
+        "valor_bruto": round(base, 2),
+    })
+
+
+def _fechar_royalty(cenario: str, base: float, cfg: Dict[str, Any], avisos: List[str],
+                    extra: Dict[str, Any]) -> Dict[str, Any]:
+    if base < 0:
+        avisos.append("Base negativa.")
+    taxa_valor = float(cfg.get("taxa_valor") or 0)
+    taxa_tipo = cfg.get("taxa_tipo") or "percentual"
+    if taxa_valor <= 0:
+        avisos.append("Cidade sem % de royalty configurada.")
+    royalty = _aplicar(base, taxa_valor, taxa_tipo)
+    # Cenários 3 e 4: o financeiro não somou tarifa de boleto nos vídeos; só soma se a config pedir.
+    tarifa = _aplicar(base, float(cfg.get("tarifa_boleto") or 0), cfg.get("tarifa_boleto_tipo") or "fixo") \
+        if cfg.get("somar_tarifa_boleto") else 0.0
+    return {
+        "cenario": cenario,
+        **extra,
+        "saldo_01": round(base, 2),
+        "base_royalties": round(base, 2),
+        "taxa_cidade": taxa_valor,
+        "taxa_cidade_tipo": taxa_tipo,
+        "royalty": round(royalty, 2),
+        "tarifa_boleto": round(tarifa, 2),
+        "valor_final": round(royalty + tarifa, 2),
+        "avisos": avisos,
+    }
+
+
+def coletar_cidade_extrato(
+    http: requests.Session,
+    bandeira_id: str,
+    ano_mes: str,
+    cenario: str,
+    cartao: Dict[str, Any],
+    trocar: bool = True,
+) -> Dict[str, Any]:
+    """
+    Cenários 3 e 4. `cartao` (transações) é lido ANTES, pela matriz. Aqui: troca de central →
+    taxas (só para confirmar a central) → [cenário 3: dispara filtro de corridas p/ seguro] →
+    extrato → [cenário 3: vouchers] → [cenário 3: espera o filtro].
+    """
+    tempos: Dict[str, float] = {}
+    t = time.time()
+
+    def marca(etapa: str) -> None:
+        nonlocal t
+        agora = time.time()
+        tempos[etapa] = round(agora - t, 2)
+        t = agora
+
+    avisos: List[str] = []
+    if trocar:
+        trocar_central(http, bandeira_id, confirmar=False)
+        marca("troca_central")
+        taxas = obter_taxas_bandeira(http)
+        ativa = taxas.get("_central_ativa")
+        if ativa is None:
+            confirmar_central(listar_centrais_html(http), bandeira_id)
+        elif ativa != str(bandeira_id):
+            raise ErroFinanceiro("troca_central_falhou", f"Não foi possível trocar para a central {bandeira_id} (atual: {ativa}).")
+        marca("taxas")
+    filtro_iniciado, erro_filtro = None, None
+    if cenario == "cenario_03":
+        try:
+            filtro_iniciado = iniciar_filtro_corridas(http, ano_mes)
+        except ErroFinanceiro as exc:
+            if exc.codigo == "sessao_expirada":
+                raise
+            erro_filtro = exc
+    extrato = obter_extrato(http, ano_mes)
+    marca("extrato")
+    entradas: Dict[str, Any] = {
+        "cenario": cenario,
+        "extrato": extrato["totais"],
+        "cartao_liquido": cartao["total"],
+    }
+    vouchers, filtro = None, None
+    if cenario == "cenario_03":
+        vouchers = obter_vouchers_tickets(http, ano_mes)
+        marca("vouchers")
+        entradas["eticket"] = vouchers["ticket"]
+        try:
+            if erro_filtro:
+                raise erro_filtro
+            filtro = concluir_filtro_corridas(http, filtro_iniciado)
+            marca("filtro_corridas")
+            entradas["corridas_finalizadas"] = filtro["total"]
+        except ErroFinanceiro as exc:
+            if exc.codigo == "sessao_expirada":
+                raise
+            filtro = {"erro": str(exc)}
+            entradas["corridas_finalizadas"] = 0
+            avisos.append(f"Filtro de Consultar corridas falhou ({exc}): seguro app ficou R$ 0,00.")
+    return {
+        "extrato": extrato,
+        "cartao": cartao,
+        "vouchers": vouchers,
+        "consultar_corridas": filtro,
+        "avisos": avisos,
+        "tempos_s": tempos,
+        "entradas_calculo": entradas,
     }
 
 
