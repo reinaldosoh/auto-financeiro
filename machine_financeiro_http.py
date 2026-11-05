@@ -369,6 +369,66 @@ def obter_ganhos_mes(
     return out
 
 
+# ───────────────────────── Consultar corridas (filtro do mês, status Finalizada) ─────────────────────────
+
+FILTRO_CORRIDAS_TIMEOUT_SEG = 240
+
+
+def contar_corridas_finalizadas(http: requests.Session, ano_mes: str) -> Dict[str, Any]:
+    """
+    Igual ao financeiro: Corridas › Consultar corridas › dia 1 00:00 até o último dia 23:59,
+    status Finalizada → "1-30 de N resultados". Usa a central ATIVA (fazer trocar_central antes).
+    O Painel pode dar alguns a menos (Passos 10/2026: Painel 5.096, filtro 5.098).
+    """
+    from machine_dashboard_http import _parse_grid_render
+    from machine_relatorio_http import _form_corridas, _headers_corridas, status_corridas
+
+    ano, mes = validar_ano_mes(ano_mes)
+    inicio, fim = date(ano, mes, 1), date(ano, mes, monthrange(ano, mes)[1])
+    form = _form_corridas(inicio, fim)
+    form["HistoricoFilterForm[status_solicitacao]"] = "F"
+
+    http.get(BASE_URL + "/solicitacao/historicoCorridas2", params={"resetSesion": "1"},
+             headers={**_HEADERS_PAGINA, "Referer": BASE_URL + "/"}, timeout=60)
+    r = http.post(BASE_URL + "/solicitacao/relatorioCorridas", data=form, headers=_headers_corridas(), timeout=60)
+    if _sessao_expirada(r):
+        raise ErroFinanceiro("sessao_expirada", "Sessão da Machine expirou. Faça login novamente.", 401)
+    data = _parse_json_response(r)
+    report_id = data.get("report_id")
+    if not data.get("success") or not report_id:
+        raise ErroFinanceiro("filtro_corridas_falhou", data.get("message") or "A Machine recusou o filtro de corridas.")
+
+    if data.get("tipo") != "sincrono":
+        limite = time.time() + FILTRO_CORRIDAS_TIMEOUT_SEG
+        while True:
+            st = status_corridas(http, report_id, None)
+            if st["cancelado"]:
+                raise ErroFinanceiro("filtro_corridas_cancelado", "O filtro de corridas foi cancelado pela Machine.")
+            if st["filtro_pronto"]:
+                break
+            if time.time() > limite:
+                raise ErroFinanceiro("filtro_corridas_timeout", "Tempo esgotado esperando o filtro de corridas.")
+            time.sleep(4)
+
+    r = http.post(BASE_URL + "/solicitacao/historicoCorridas2", data={"json": "true"},
+                  headers=_headers_corridas(), timeout=60)
+    payload = _parse_json_response(r)
+    render = payload.get("render") or ""
+    _, meta = _parse_grid_render(render)
+    if meta.get("total") is None:
+        if re.search(r"nenhum resultado", render, re.I):
+            meta["total"] = 0
+        else:
+            raise ErroFinanceiro("filtro_corridas_sem_total", "Não encontrei o total de corridas no resultado do filtro.")
+    texto_filtro = _texto(render[:4000])
+    return {
+        "total": int(meta["total"]),
+        "periodo": f"{inicio:%d/%m/%Y} 00:00 a {fim:%d/%m/%Y} 23:59",
+        "status_confirmado": "Finalizada" in texto_filtro,
+        "resumo": meta.get("summary"),
+    }
+
+
 # ───────────────────────── taxas (/bandeira/taxas) ─────────────────────────
 
 _TITULO_TAXA = {
@@ -743,6 +803,22 @@ def coletar_cidade(
         trocar_central(http, bandeira_id)
     ganhos = obter_ganhos_mes(http, ano_mes, bandeira_id=bandeira_id)
     taxas = obter_taxas_bandeira(http)
+    # Quantidade de corridas: mesmo método do financeiro (Consultar corridas, status Finalizada).
+    try:
+        filtro = contar_corridas_finalizadas(http, ano_mes)
+        corridas = filtro["total"]
+        if not filtro["status_confirmado"]:
+            ganhos["avisos"].append("Filtro de corridas sem confirmação do status Finalizada: confira a quantidade.")
+        if corridas != ganhos["corridas_finalizadas"]:
+            ganhos["avisos"].append(
+                f"Consultar corridas: {corridas} finalizadas (Painel mostra {ganhos['corridas_finalizadas']}). Usado o filtro."
+            )
+    except ErroFinanceiro as exc:
+        if exc.codigo == "sessao_expirada":
+            raise
+        filtro = {"erro": str(exc)}
+        corridas = ganhos["corridas_finalizadas"]
+        ganhos["avisos"].append(f"Filtro de Consultar corridas falhou ({exc}); usada a quantidade do Painel.")
     pct = taxas["taxa_central"].get("percentual")
     fixo = taxas["taxa_central"].get("valor_fixo")
     if pct is not None:
@@ -755,6 +831,7 @@ def coletar_cidade(
         "ganhos": ganhos,
         "taxas": taxas,
         "demonstrativo": dem,
+        "consultar_corridas": filtro,
         "entradas_calculo": {
             "ganhos_gerais": ganhos["ganhos_gerais"],
             "cenario": cenario,
@@ -762,7 +839,7 @@ def coletar_cidade(
             "taxa_central_fixo": fixo if pct is None else None,
             "boleto_machine": dem["valor_a_pagar"],
             "itens_demonstrativo": dem["itens"],
-            "corridas_finalizadas": ganhos["corridas_finalizadas"],
+            "corridas_finalizadas": corridas,
         },
     }
 

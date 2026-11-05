@@ -39,8 +39,9 @@ valor_final  = base × % da cidade + tarifa de boleto
 ```
 
 O cenário é detectado sozinho pela tela de taxas: Taxa da central em **%** → cenário 1;
-em **R$** → cenário 2. A quantidade de corridas finalizadas vem do Painel (mês passado),
-a mesma do filtro de Consultar corridas.
+em **R$** → cenário 2. A quantidade de corridas finalizadas vem de **Consultar corridas**
+(dia 1 00:00 ao último dia 23:59, status Finalizada), igual ao financeiro. O Painel pode dar
+alguns a menos (Passos 10/2026: Painel 5.096, filtro 5.098 → R$ 1.072,56 conferido).
 
 **O boleto NÃO é o "Valor a pagar" da Machine** (R$ 3.134,97 em Alfenas). A Ubiz usa as
 quantidades do demonstrativo com a própria tabela de preços:
