@@ -60,8 +60,10 @@ O "Cartão no App" e o "eTicket" do extrato **não** entram: são o líquido cre
 
 ```
 taxa do cartão = Transações com cartão (líquido da bandeira) − "Cartão no App" do extrato
-royalty        = (Taxa da central do extrato + taxa do cartão) × % da Ubiz
+base           = Taxa da central do extrato + taxa do cartão − seguro app (corridas × taxa + 3,50)
+royalty        = base × % da Ubiz                (sem tarifa de boleto)
 ```
+Conferido: Itapetininga 10/2026 = (1.296,72 − 68,00) × 30% = R$ 368,62.
 
 ### Rotas Machine dos cenários 3 e 4 (todas HTTP, sem navegador)
 

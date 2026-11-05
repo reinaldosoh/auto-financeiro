@@ -234,13 +234,25 @@ def test_cenario_03_mariana_video():
 
 
 def test_cenario_04_taxa_central_mais_taxa_cartao():
-    e = {"cenario": "cenario_04", "extrato": {"tx_central": 50000.0, "cartao": 59184.0}, "cartao_liquido": 76143.0}
-    c = calcular_cenario(e, {"taxa_valor": 10})
+    e = {"cenario": "cenario_04", "extrato": {"tx_central": 50000.0, "cartao": 59184.0}, "cartao_liquido": 76143.0,
+         "corridas_finalizadas": 0}
+    c = calcular_cenario(e, {"taxa_valor": 10, "descontar_seguro": False})
     assert c["taxa_cartao"] == 16959.0                         # 76.143 − 59.184 (vídeo)
     assert c["base_royalties"] == 66959.0
     assert c["valor_final"] == 6695.9
-    c2 = calcular_cenario(e, {"taxa_valor": 10, "tarifa_boleto": 3.5, "somar_tarifa_boleto": True})
+    c2 = calcular_cenario(e, {"taxa_valor": 10, "tarifa_boleto": 3.5, "somar_tarifa_boleto": True, "descontar_seguro": False})
     assert c2["valor_final"] == 6699.4
+
+
+def test_cenario_04_itapetininga_igual_ao_financeiro():
+    """Conferido com o financeiro (Itapetininga 10/2026): (1.296,72 − 68,00) × 30% = R$ 368,62."""
+    e = {"cenario": "cenario_04", "extrato": {"tx_central": 1296.72, "cartao": 0}, "cartao_liquido": 0,
+         "corridas_finalizadas": 430}
+    c = calcular_cenario(e, {"taxa_valor": 30, "taxa_seguro_app": 0.15, "taxa_seguro_app_tipo": "fixo", "tarifa_boleto": 3.5})
+    assert c["seguro_app"] == 68.00
+    assert c["base_royalties"] == 1228.72
+    assert c["valor_final"] == 368.62
+    assert c["tarifa_boleto"] == 0
 
 
 def test_datas():

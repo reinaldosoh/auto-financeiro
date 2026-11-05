@@ -1138,9 +1138,12 @@ def calcular_cenario_03(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
 
 def calcular_cenario_04(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Cenário 4 (vídeo "COBRANÇA ROYALTIES - CENÁRIO 4"):
+    Cenário 4 (vídeo "COBRANÇA ROYALTIES - CENÁRIO 4" + conferência do financeiro, Itapetininga 10/2026):
       taxa do cartão = transações (líquido da bandeira) − "Cartão no App" do extrato
-      royalty        = (Taxa da central do extrato + taxa do cartão) × % da Ubiz
+      base           = Taxa da central do extrato + taxa do cartão − seguro app
+      royalty        = base × % da Ubiz            (sem tarifa de boleto)
+    Seguro = corridas finalizadas (Consultar corridas) × taxa + R$ 3,50. Itapetininga: 430 × 0,15 + 3,50 = 68,00
+    → (1.296,72 − 68,00) × 30% = R$ 368,62 (conferido).
     """
     ext = entradas["extrato"]
     tx_central = float(ext.get("tx_central") or 0)
@@ -1150,13 +1153,23 @@ def calcular_cenario_04(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
     avisos: List[str] = []
     if taxa_cartao < 0:
         avisos.append("Cartão: transações menores que o 'Cartão no App' do extrato (taxa do cartão negativa).")
-    base = tx_central + taxa_cartao
+    descontar = cfg.get("descontar_seguro")
+    if descontar is None or descontar:
+        seguro = calcular_seguro_app(float(entradas.get("corridas_finalizadas") or 0), cfg)
+        if seguro["origem"] == "nao_configurada":
+            avisos.append("Seguro app sem taxa configurada: descontado R$ 0,00.")
+    else:
+        seguro = {"valor": 0.0, "taxa": 0.0, "tipo": "fixo", "origem": "nao_descontado"}
+    bruto = tx_central + taxa_cartao
+    base = bruto - seguro["valor"]
     return _fechar_royalty("cenario_04", base, cfg, avisos, {
         "taxa_central_extrato": round(tx_central, 2),
         "cartao_transacoes": round(cartao_liq, 2),
         "cartao_no_app_extrato": round(cartao_extrato, 2),
         "taxa_cartao": round(taxa_cartao, 2),
-        "valor_bruto": round(base, 2),
+        "seguro_app": seguro["valor"],
+        "seguro_app_detalhe": seguro,
+        "valor_bruto": round(bruto, 2),
     })
 
 
@@ -1196,8 +1209,8 @@ def coletar_cidade_extrato(
 ) -> Dict[str, Any]:
     """
     Cenários 3 e 4. `cartao` (transações) é lido ANTES, pela matriz. Aqui: troca de central →
-    taxas (só para confirmar a central) → [cenário 3: dispara filtro de corridas p/ seguro] →
-    extrato → [cenário 3: vouchers] → [cenário 3: espera o filtro].
+    taxas (só para confirmar a central) → dispara o filtro de corridas (seguro) → extrato →
+    [cenário 3: vouchers] → espera o filtro.
     """
     tempos: Dict[str, float] = {}
     t = time.time()
@@ -1220,7 +1233,7 @@ def coletar_cidade_extrato(
             raise ErroFinanceiro("troca_central_falhou", f"Não foi possível trocar para a central {bandeira_id} (atual: {ativa}).")
         marca("taxas")
     filtro_iniciado, erro_filtro = None, None
-    if cenario == "cenario_03":
+    if cenario in ("cenario_03", "cenario_04"):  # ambos descontam o seguro app
         try:
             filtro_iniciado = iniciar_filtro_corridas(http, ano_mes)
         except ErroFinanceiro as exc:
@@ -1239,6 +1252,7 @@ def coletar_cidade_extrato(
         vouchers = obter_vouchers_tickets(http, ano_mes)
         marca("vouchers")
         entradas["eticket"] = vouchers["ticket"]
+    if cenario in ("cenario_03", "cenario_04"):
         try:
             if erro_filtro:
                 raise erro_filtro

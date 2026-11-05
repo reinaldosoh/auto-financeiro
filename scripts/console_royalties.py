@@ -61,7 +61,7 @@ th:first-child,td:first-child{text-align:left}.hidden{display:none}pre{white-spa
 <option value="cenario_04">Cenário 4 – taxa da central + taxa do cartão</option></select>
 <div class="row"><div><label>Competência</label><input id="mes" type="month"></div>
 <div><label>Royalty Ubiz da cidade (%) – usado no teste</label><input id="pct" type="number" step="0.01" value="10"></div></div>
-<div class="row"><div id="campoSeg"><label>Seguro app por corrida (R$) – cenários 1 e 3</label><input id="seg" type="number" step="0.01" value="0.15"></div>
+<div class="row"><div id="campoSeg"><label>Seguro app por corrida (R$) – cenários 1, 3 e 4</label><input id="seg" type="number" step="0.01" value="0.15"></div>
 <div><label>Tarifa de boleto (R$)</label><input id="tar" type="number" step="0.01" value="3.50"></div></div>
 <label>Cidades <a href="#" id="todas">marcar todas</a> · <a href="#" id="nenhuma">nenhuma</a></label><div id="lista" class="lista"></div>
 <button id="bRodar">Rodar (simulação, não grava)</button><div id="m3" class="msg"></div>
@@ -99,7 +99,7 @@ $('nenhuma').onclick=e=>{e.preventDefault();document.querySelectorAll('#lista in
 function detalhe(k){
   if(k.cenario==='cenario_03'){const l=a=>a.map(x=>x.item+': '+brl(x.valor)).join('<br>');
     return '<details><summary><small>componentes</small></summary><small><b>Entradas '+brl(k.total_entradas)+'</b><br>'+l(k.entradas)+'<br><b>Saídas '+brl(k.total_saidas)+'</b><br>'+l(k.saidas)+'</small></details>'}
-  if(k.cenario==='cenario_04')return '<details><summary><small>componentes</small></summary><small>Taxa da central (extrato): '+brl(k.taxa_central_extrato)+'<br>Cartão transações: '+brl(k.cartao_transacoes)+'<br>− Cartão no App (extrato): '+brl(k.cartao_no_app_extrato)+'<br>= Taxa do cartão: '+brl(k.taxa_cartao)+'</small></details>';
+  if(k.cenario==='cenario_04')return '<details><summary><small>componentes</small></summary><small>Taxa da central (extrato): '+brl(k.taxa_central_extrato)+'<br>Cartão transações: '+brl(k.cartao_transacoes)+'<br>− Cartão no App (extrato): '+brl(k.cartao_no_app_extrato)+'<br>= Taxa do cartão: '+brl(k.taxa_cartao)+'<br>− Seguro app: '+brl(k.seguro_app)+'</small></details>';
   return ''}
 function render(j){$('json').textContent=JSON.stringify(j,null,2);$('tab').classList.remove('hidden');
   $('tab').querySelector('tbody').innerHTML=j.cidades.map(c=>{const k=c.calculo||{},nome=(document.querySelector(`#lista input[value="${c.bandeira_id}"]`)||{}).parentElement;
@@ -107,7 +107,7 @@ function render(j){$('json').textContent=JSON.stringify(j,null,2);$('tab').class
    return `<tr><td>${n}</td><td>${e}${(c.avisos||[]).length?'<br><small>'+c.avisos.join('<br>')+'</small>':''}${detalhe(k)}</td><td>${brl(k.ganhos_gerais)}</td><td>${k.cenario==='cenario_02'?(brl(k.taxa_central_fixo)+' × '+(k.corridas_finalizadas||0).toLocaleString('pt-BR')+' corr.<br><small>cenário 2</small>'):((k.taxa_central_pct??'—')+'%<br><small>cenário 1</small>')}</td><td>${brl(k.saldo_01)}</td><td>${brl(k.boleto_ubiz)}<br><small style="color:#667085">${brl(k.boleto_machine)}</small></td><td>${brl(k.seguro_app)}</td><td>${brl(k.base_royalties)}</td><td>${brl(k.royalty)}</td><td><b>${brl(k.valor_final)}</b></td></tr>`}).join('');
   msg($('m3'),`${(NOME_C[j.cenario]||'').replace('c','C')} · ${j.status} · ${j.progresso.concluidas}/${j.progresso.total} cidades · erros ${j.progresso.com_erro} · total royalties ${brl(j.totais.valor_final)} · tempo ${(j.tempos_s&&j.tempos_s.total!=null)?Math.round(j.tempos_s.total)+' s':'—'}`,j.status!=='erro')}
 const NOME_C={cenario_01:'cenário 1',cenario_02:'cenário 2',cenario_03:'cenário 3',cenario_04:'cenário 4'};
-$('cenario').onchange=()=>{const c=$('cenario').value;$('campoSeg').style.visibility=(c==='cenario_01'||c==='cenario_03')?'visible':'hidden';
+$('cenario').onchange=()=>{const c=$('cenario').value;$('campoSeg').style.visibility=(c==='cenario_02')?'hidden':'visible';
   $('bRodar').textContent=c?('Rodar '+NOME_C[c]+' (simulação, não grava)'):'Rodar (simulação, não grava)'};
 $('bRodar').onclick=async()=>{const ids=[...document.querySelectorAll('#lista input:checked')].map(i=>i.value);
   const cenario=$('cenario').value;
