@@ -35,6 +35,7 @@ from machine_financeiro_http import (
     iniciar_login,
     listar_centrais,
     mes_passado_sp,
+    campos_demonstrativo,
     obter_demonstrativo,
     periodo_rotulo,
     trocar_central,
@@ -48,7 +49,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/financeiro", tags=["financeiro"])
 
 JOB_TTL_SEG = 6 * 60 * 60
-PAUSA_ENTRE_CIDADES_SEG = float(os.environ.get("FINANCEIRO_PAUSA_CIDADES_SEG", "1.5") or "1.5")
+PAUSA_ENTRE_CIDADES_SEG = float(os.environ.get("FINANCEIRO_PAUSA_CIDADES_SEG", "0.3") or "0.3")
 
 
 def _erro(exc: Exception) -> HTTPException:
@@ -262,6 +263,7 @@ def _job_publico(job: Dict[str, Any]) -> Dict[str, Any]:
             "royalty": round(sum(c["calculo"]["royalty"] for c in ok), 2),
             "valor_final": round(sum(c["calculo"]["valor_final"] for c in ok), 2),
         },
+        "tempos_s": {**job.get("tempos_s", {}), "total": round(job["atualizado_em"] - job["criado_em"], 2)},
         "cidades": [{k: v for k, v in c.items() if not k.startswith("_")} for c in cidades],
         "criado_em": int(job["criado_em"]),
         "atualizado_em": int(job["atualizado_em"]),
@@ -273,9 +275,12 @@ def _processar_cidade(job: Dict[str, Any], item: Dict[str, Any], http, hub: Fina
     dem_erro = item.pop("_dem_erro", None)
     if dem_erro:
         raise dem_erro
+    tempo_dem = item.pop("_tempo_dem", None)
     coleta = coletar_cidade(
         http, item["bandeira_id"], job["ano_mes"], demonstrativo=item.pop("_dem", None), cenario=job["cenario"]
     )
+    coleta["tempos_s"]["demonstrativo"] = tempo_dem
+    item["tempos_s"] = coleta["tempos_s"]
     item["entradas"] = coleta
     calc = calcular_cenario(coleta["entradas_calculo"], item["cfg"])
     item["calculo"] = calc
@@ -334,21 +339,26 @@ def _executar_job(job: Dict[str, Any], http, hub: FinanceHub) -> None:
     """Sequencial: trocar central muda estado da sessão PHP na Machine."""
     central_original = None
     try:
-        try:
-            central_original = next((c["bandeira_id"] for c in listar_centrais(http) if c["atual"]), None)
-        except Exception as exc:
-            log.warning("job financeiro %s: central original desconhecida: %s", job["job_id"], exc)
+        t0 = time.time()
+        campos = campos_demonstrativo(http)  # 1 GET: formulário do demonstrativo + central atual (matriz)
+        central_original = next((c["bandeira_id"] for c in campos["centrais"] if c["atual"]), None)
+        job["tempos_s"]["preparo"] = round(time.time() - t0, 2)
         # 1ª passada: demonstrativos (boleto Machine) enquanto a sessão está na matriz.
+        t0 = time.time()
         for item in job["cidades"]:
+            ti = time.time()
             try:
-                item["_dem"] = obter_demonstrativo(http, item["bandeira_id"], job["ano_mes"])
+                item["_dem"] = obter_demonstrativo(http, item["bandeira_id"], job["ano_mes"], campos=campos)
             except ErroFinanceiro as exc:
                 if exc.codigo == "sessao_expirada":
                     raise
                 item["_dem_erro"] = exc
             except Exception as exc:
                 item["_dem_erro"] = ErroFinanceiro("demonstrativo_falhou", str(exc))
+            item["_tempo_dem"] = round(time.time() - ti, 2)
             job["atualizado_em"] = time.time()
+        job["tempos_s"]["demonstrativos"] = round(time.time() - t0, 2)
+        t0 = time.time()
         # 2ª passada: por cidade, troca de central → ganhos → taxas → cálculo.
         for item in job["cidades"]:
             try:
@@ -364,6 +374,7 @@ def _executar_job(job: Dict[str, Any], http, hub: FinanceHub) -> None:
             job["atualizado_em"] = time.time()
             get_session(job["session_token"])  # renova TTL da sessão durante a rodada
             time.sleep(PAUSA_ENTRE_CIDADES_SEG)
+        job["tempos_s"]["cidades"] = round(time.time() - t0, 2)
         job["status"] = "ready"
     except Exception as exc:
         job["status"] = "erro"
@@ -371,6 +382,7 @@ def _executar_job(job: Dict[str, Any], http, hub: FinanceHub) -> None:
         for item in job["cidades"]:
             item.pop("_dem", None)
             item.pop("_dem_erro", None)
+            item.pop("_tempo_dem", None)
             if item["status"] in ("aguardando", "processando"):
                 item.update(status="erro", erro={"codigo": "interrompido", "mensagem": str(exc)})
     finally:
@@ -499,6 +511,7 @@ async def financeiro_royalties_rodar(inp: RodarInput, x_session_token: str = Hea
             "sobrescrever": inp.sobrescrever,
             "status": "processing",
             "erro": None,
+            "tempos_s": {},
             "criado_em": agora,
             "atualizado_em": agora,
             "cidades": itens,

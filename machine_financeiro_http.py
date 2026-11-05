@@ -287,21 +287,43 @@ def listar_centrais(http: requests.Session) -> List[Dict[str, Any]]:
     return centrais
 
 
-def trocar_central(http: requests.Session, bandeira_id: str) -> None:
-    """Equivale a escolher a cidade no seletor do topo do painel."""
+def trocar_central(http: requests.Session, bandeira_id: str, confirmar: bool = True) -> None:
+    """
+    Equivale a escolher a cidade no seletor do topo do painel.
+    Não segue o redirect (que carregaria a home inteira). Com confirmar=False, quem chama
+    confirma depois com `central_ativa(html)` numa página que já vai baixar (ex.: taxas).
+    """
     bandeira_id = str(bandeira_id)
-    http.post(
+    r = http.post(
         BASE_URL + "/site/trocarCentral",
         data={"bandeiraId": bandeira_id},
         headers={**_HEADERS_PAGINA, "Referer": BASE_URL + "/demonstrativoMensal/index"},
         timeout=60,
+        allow_redirects=False,
     )
-    atual = next((c for c in listar_centrais(http) if c["atual"]), None)
-    if not atual or atual["bandeira_id"] != bandeira_id:
+    if r.status_code >= 400:
+        raise ErroFinanceiro("troca_central_falhou", f"Machine recusou a troca para a central {bandeira_id} (HTTP {r.status_code}).")
+    if "site/login" in (r.headers.get("Location") or ""):
+        raise ErroFinanceiro("sessao_expirada", "Sessão da Machine expirou. Faça login novamente.", 401)
+    if confirmar:
+        confirmar_central(listar_centrais_html(http), bandeira_id)
+
+
+def central_ativa(html: str) -> Optional[str]:
+    return next((c["bandeira_id"] for c in parse_centrais(html) if c["atual"]), None)
+
+
+def confirmar_central(html: str, bandeira_id: str) -> None:
+    atual = central_ativa(html)
+    if atual is not None and atual != str(bandeira_id):
         raise ErroFinanceiro(
             "troca_central_falhou",
-            f"Não foi possível trocar para a central {bandeira_id} (atual: {atual and atual['bandeira_id']}).",
+            f"Não foi possível trocar para a central {bandeira_id} (atual: {atual}).",
         )
+
+
+def listar_centrais_html(http: requests.Session) -> str:
+    return _get_pagina(http, "/demonstrativoMensal/index").text
 
 
 # ───────────────────────── ganhos gerais (Painel → Indicadores) ─────────────────────────
@@ -374,22 +396,27 @@ def obter_ganhos_mes(
 FILTRO_CORRIDAS_TIMEOUT_SEG = 240
 
 
-def contar_corridas_finalizadas(http: requests.Session, ano_mes: str) -> Dict[str, Any]:
-    """
-    Igual ao financeiro: Corridas › Consultar corridas › dia 1 00:00 até o último dia 23:59,
-    status Finalizada → "1-30 de N resultados". Usa a central ATIVA (fazer trocar_central antes).
-    O Painel pode dar alguns a menos (Passos 10/2026: Painel 5.096, filtro 5.098).
-    """
-    from machine_dashboard_http import _parse_grid_render
-    from machine_relatorio_http import _form_corridas, _headers_corridas, status_corridas
+def _intervalos_polling():
+    """1 s nos primeiros 10 s, depois 2 s, depois 3 s (a Machine leva de segundos a ~1 min)."""
+    for _ in range(10):
+        yield 1.0
+    for _ in range(10):
+        yield 2.0
+    while True:
+        yield 3.0
+
+
+def iniciar_filtro_corridas(http: requests.Session, ano_mes: str, resetar: bool = False) -> Dict[str, Any]:
+    """Dispara o filtro (dia 1 00:00 ao último dia 23:59, status Finalizada) na central ativa."""
+    from machine_relatorio_http import _form_corridas, _headers_corridas
 
     ano, mes = validar_ano_mes(ano_mes)
     inicio, fim = date(ano, mes, 1), date(ano, mes, monthrange(ano, mes)[1])
     form = _form_corridas(inicio, fim)
     form["HistoricoFilterForm[status_solicitacao]"] = "F"
-
-    http.get(BASE_URL + "/solicitacao/historicoCorridas2", params={"resetSesion": "1"},
-             headers={**_HEADERS_PAGINA, "Referer": BASE_URL + "/"}, timeout=60)
+    if resetar:
+        http.get(BASE_URL + "/solicitacao/historicoCorridas2", params={"resetSesion": "1"},
+                 headers={**_HEADERS_PAGINA, "Referer": BASE_URL + "/"}, timeout=60)
     r = http.post(BASE_URL + "/solicitacao/relatorioCorridas", data=form, headers=_headers_corridas(), timeout=60)
     if _sessao_expirada(r):
         raise ErroFinanceiro("sessao_expirada", "Sessão da Machine expirou. Faça login novamente.", 401)
@@ -397,36 +424,56 @@ def contar_corridas_finalizadas(http: requests.Session, ano_mes: str) -> Dict[st
     report_id = data.get("report_id")
     if not data.get("success") or not report_id:
         raise ErroFinanceiro("filtro_corridas_falhou", data.get("message") or "A Machine recusou o filtro de corridas.")
+    return {"report_id": report_id, "sincrono": data.get("tipo") == "sincrono", "inicio": inicio, "fim": fim,
+            "ano_mes": ano_mes, "resetado": resetar}
 
-    if data.get("tipo") != "sincrono":
+
+def concluir_filtro_corridas(http: requests.Session, filtro: Dict[str, Any]) -> Dict[str, Any]:
+    from machine_dashboard_http import _parse_grid_render
+    from machine_relatorio_http import _headers_corridas, status_corridas
+
+    if not filtro["sincrono"]:
         limite = time.time() + FILTRO_CORRIDAS_TIMEOUT_SEG
-        while True:
-            st = status_corridas(http, report_id, None)
+        for espera in _intervalos_polling():
+            st = status_corridas(http, filtro["report_id"], None)
             if st["cancelado"]:
                 raise ErroFinanceiro("filtro_corridas_cancelado", "O filtro de corridas foi cancelado pela Machine.")
             if st["filtro_pronto"]:
                 break
             if time.time() > limite:
                 raise ErroFinanceiro("filtro_corridas_timeout", "Tempo esgotado esperando o filtro de corridas.")
-            time.sleep(4)
+            time.sleep(espera)
 
     r = http.post(BASE_URL + "/solicitacao/historicoCorridas2", data={"json": "true"},
                   headers=_headers_corridas(), timeout=60)
     payload = _parse_json_response(r)
     render = payload.get("render") or ""
+    texto_filtro = _texto(render[:4000])
+    inicio, fim = filtro["inicio"], filtro["fim"]
+    # Sem o GET de reset, confere se o grid é mesmo do período pedido; se não, refaz com reset.
+    if f"{inicio:%d/%m/%Y}" not in texto_filtro and not filtro.get("resetado"):
+        return concluir_filtro_corridas(http, iniciar_filtro_corridas(http, filtro["ano_mes"], resetar=True))
     _, meta = _parse_grid_render(render)
     if meta.get("total") is None:
         if re.search(r"nenhum resultado", render, re.I):
             meta["total"] = 0
         else:
             raise ErroFinanceiro("filtro_corridas_sem_total", "Não encontrei o total de corridas no resultado do filtro.")
-    texto_filtro = _texto(render[:4000])
     return {
         "total": int(meta["total"]),
         "periodo": f"{inicio:%d/%m/%Y} 00:00 a {fim:%d/%m/%Y} 23:59",
         "status_confirmado": "Finalizada" in texto_filtro,
         "resumo": meta.get("summary"),
     }
+
+
+def contar_corridas_finalizadas(http: requests.Session, ano_mes: str) -> Dict[str, Any]:
+    """
+    Igual ao financeiro: Corridas › Consultar corridas › dia 1 00:00 até o último dia 23:59,
+    status Finalizada → "1-30 de N resultados". Usa a central ATIVA (fazer trocar_central antes).
+    O Painel pode dar alguns a menos (Passos 10/2026: Painel 5.096, filtro 5.098).
+    """
+    return concluir_filtro_corridas(http, iniciar_filtro_corridas(http, ano_mes))
 
 
 # ───────────────────────── taxas (/bandeira/taxas) ─────────────────────────
@@ -502,6 +549,7 @@ def obter_taxas_bandeira(http: requests.Session) -> Dict[str, Any]:
         taxas = parse_taxas(r.text)
         if taxas.get("taxa_central"):
             taxas["_origem"] = caminho
+            taxas["_central_ativa"] = central_ativa(r.text)
             return taxas
         ultimo_erro = f"Taxa da central não encontrada em {caminho}"
     raise ErroFinanceiro("taxas_nao_encontradas", ultimo_erro or "Taxas não encontradas.")
@@ -579,15 +627,24 @@ def _diagnostico_html(r: requests.Response) -> Dict[str, Any]:
     }
 
 
-def obter_demonstrativo(http: requests.Session, bandeira_id: str, ano_mes: str) -> Dict[str, Any]:
+def campos_demonstrativo(http: requests.Session) -> Dict[str, Any]:
+    """Uma GET por rodada: campos ocultos do formulário + lista de centrais (mesma página)."""
+    r = _get_pagina(http, "/demonstrativoMensal/index")
+    form = re.search(r"<form[^>]*action=\"[^\"]*demonstrativoMensal/index\"[^>]*>(.*?)</form>", r.text, re.S)
+    return {"ocultos": _inputs_ocultos(form.group(1) if form else ""), "centrais": parse_centrais(r.text), "_resp": r}
+
+
+def obter_demonstrativo(
+    http: requests.Session, bandeira_id: str, ano_mes: str, campos: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """
     "Boleto da Machine". Funciona com a sessão na central da MATRIZ (seletor de bandeiras).
     Tenta POST do formulário (como o painel) e, se não vier tabela, GET com os mesmos parâmetros.
     """
     validar_ano_mes(ano_mes)
-    r_get = _get_pagina(http, "/demonstrativoMensal/index")
-    form = re.search(r"<form[^>]*action=\"[^\"]*demonstrativoMensal/index\"[^>]*>(.*?)</form>", r_get.text, re.S)
-    dados = _inputs_ocultos(form.group(1) if form else "")
+    campos = campos or campos_demonstrativo(http)
+    r_get = campos["_resp"]
+    dados = list(campos["ocultos"])
     dados += [("FinCobrancaBandeira[bandeira_id]", str(bandeira_id)), ("data_ano_mes", ano_mes)]
     tentativas = []
     r = http.post(
@@ -804,12 +861,32 @@ def coletar_cidade(
     """
     Busca na Machine tudo que o cálculo precisa, para uma cidade.
     `demonstrativo` deve ser lido ANTES da troca de central (a tela só funciona na matriz).
+    Ordem pensada para tempo: troca → taxas (confirma central e cenário) → dispara o filtro de
+    corridas → ganhos enquanto a Machine processa → espera o filtro.
     """
+    tempos: Dict[str, float] = {}
+    t = time.time()
+
+    def marca(etapa: str) -> None:
+        nonlocal t
+        agora = time.time()
+        tempos[etapa] = round(agora - t, 2)
+        t = agora
+
     dem = demonstrativo if demonstrativo is not None else obter_demonstrativo(http, bandeira_id, ano_mes)
+    marca("demonstrativo")
     if trocar:
-        trocar_central(http, bandeira_id)
-    ganhos = obter_ganhos_mes(http, ano_mes, bandeira_id=bandeira_id)
+        trocar_central(http, bandeira_id, confirmar=False)
+        marca("troca_central")
     taxas = obter_taxas_bandeira(http)
+    if trocar:
+        ativa = taxas.get("_central_ativa")
+        if ativa is None:  # página de taxas sem o seletor: confirma do jeito antigo
+            confirmar_central(listar_centrais_html(http), bandeira_id)
+        elif ativa != str(bandeira_id):
+            raise ErroFinanceiro("troca_central_falhou", f"Não foi possível trocar para a central {bandeira_id} (atual: {ativa}).")
+    marca("taxas")
+
     pct = taxas["taxa_central"].get("percentual")
     fixo = taxas["taxa_central"].get("valor_fixo")
     if pct is not None:
@@ -827,8 +904,21 @@ def coletar_cidade(
         )
     cenario = cenario or cenario_machine
     # Quantidade de corridas: mesmo método do financeiro (Consultar corridas, status Finalizada).
+    # Dispara o filtro, busca os ganhos enquanto a Machine processa e só então espera.
+    filtro_iniciado, erro_filtro = None, None
     try:
-        filtro = contar_corridas_finalizadas(http, ano_mes)
+        filtro_iniciado = iniciar_filtro_corridas(http, ano_mes)
+    except ErroFinanceiro as exc:
+        if exc.codigo == "sessao_expirada":
+            raise
+        erro_filtro = exc
+    ganhos = obter_ganhos_mes(http, ano_mes, bandeira_id=bandeira_id)
+    marca("ganhos")
+    try:
+        if erro_filtro:
+            raise erro_filtro
+        filtro = concluir_filtro_corridas(http, filtro_iniciado)
+        marca("filtro_corridas")
         corridas = filtro["total"]
         if not filtro["status_confirmado"]:
             ganhos["avisos"].append("Filtro de corridas sem confirmação do status Finalizada: confira a quantidade.")
@@ -847,6 +937,7 @@ def coletar_cidade(
         "taxas": taxas,
         "demonstrativo": dem,
         "consultar_corridas": filtro,
+        "tempos_s": tempos,
         "entradas_calculo": {
             "ganhos_gerais": ganhos["ganhos_gerais"],
             "cenario": cenario,
