@@ -302,6 +302,58 @@ class _HttpGrade:
         return _Resp(_grade(ids, self.total))
 
 
+def _html_aninhado(vl_min="1.00", vl_recarga=""):
+    """Estrutura real do painel: modais em forms ocultos dentro do taxista-form; saldo depois deles."""
+    def radios(campo):
+        return (
+            f'<input id="yt{campo}" type="hidden" value="" name="MpayConfigTaxista[{campo}]" />'
+            f'<input value="0" checked="checked" type="radio" name="MpayConfigTaxista[{campo}]" />'
+            f'<input value="N" type="radio" name="MpayConfigTaxista[{campo}]" />'
+            f'<input value="1" type="radio" name="MpayConfigTaxista[{campo}]" />'
+        )
+    return f"""
+<form id="taxista-form" method="post" action="/taxista/update/99">
+<input type="hidden" name="Taxista[id]" value="99" />
+<select name="Taxista[taxista_apoio]"><option value="0">Motorista prioritário</option>
+<option value="1" selected="selected">Motorista secundário</option></select>
+<form hidden="hidden" id="yw1"><input type="text" name="Modal1[campo]" value="m1" /></form>
+<input type="text" name="Taxista[depois_do_primeiro_fecha]" value="ok" />
+<form hidden="hidden" id="yw2"><input type="text" name="Modal2[campo]" value="m2" /></form>
+{radios("credito_minimo")}
+<input type="number" name="MpayConfigTaxista[vl_saldo_min_corrida_presencial]" value="{vl_min}" />
+{radios("ativar_mensagens")}
+<input type="number" name="MpayConfigTaxista[vl_saldo_acionar_recarga]" value="{vl_recarga}" />
+<button type="submit" name="yt0">Gravar</button>
+</form>
+"""
+
+
+class FormularioComoNavegadorTests(unittest.TestCase):
+    def test_campos_depois_do_primeiro_fecha_form_entram(self):
+        f = _TaxistaFormParser.parse(_html_aninhado())
+        self.assertEqual(f["Taxista[depois_do_primeiro_fecha]"], ["ok"])
+        self.assertEqual(f["Modal1[campo]"], ["m1"])  # form aberto dentro do principal é ignorado
+        self.assertNotIn("Modal2[campo]", f)  # form aberto depois do primeiro </form> é outro form
+        self.assertIn("MpayConfigTaxista[credito_minimo]", f)
+
+    def test_saldo_personalizado_vira_opcao_1(self):
+        f = _TaxistaFormParser.parse(_html_aninhado(vl_min="1.00", vl_recarga="3.00"))
+        self.assertEqual(f["MpayConfigTaxista[credito_minimo]"], ["", "1"])
+        self.assertEqual(f["MpayConfigTaxista[vl_saldo_min_corrida_presencial]"], ["1.00"])
+        self.assertEqual(f["MpayConfigTaxista[ativar_mensagens]"], ["", "1"])
+
+    def test_saldo_vazio_segue_padrao_e_nao_envia_valor(self):
+        f = _TaxistaFormParser.parse(_html_aninhado(vl_min="", vl_recarga=""))
+        self.assertEqual(f["MpayConfigTaxista[credito_minimo]"], ["", "0"])
+        self.assertNotIn("MpayConfigTaxista[vl_saldo_min_corrida_presencial]", f)
+        self.assertNotIn("MpayConfigTaxista[vl_saldo_acionar_recarga]", f)
+
+    def test_saldo_desativado_vira_N(self):
+        f = _TaxistaFormParser.parse(_html_aninhado(vl_min="-9999999999.99"))
+        self.assertEqual(f["MpayConfigTaxista[credito_minimo]"], ["", "N"])
+        self.assertNotIn("MpayConfigTaxista[vl_saldo_min_corrida_presencial]", f)
+
+
 class ListarTaxistasTests(unittest.TestCase):
     def test_parse_grade(self):
         g = parse_grade_taxistas(_grade([772770, 5], 1594))

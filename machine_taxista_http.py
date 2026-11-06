@@ -93,11 +93,47 @@ class _TaxistaFormParser:
                 start = m.start()
         if start < 0:
             raise RuntimeError("Formulário taxista/update não encontrado na página.")
-        end = html.find("</form>", start)
-        if end < 0:
-            raise RuntimeError("Fim do formulário taxista não encontrado.")
-        form = html[start : end + len("</form>")]
+        form = _TaxistaFormParser._recortar_como_navegador(html, start)
         return re.sub(r"<script[\s\S]*?</script>", "", form, flags=re.I)
+
+    @staticmethod
+    def _recortar_como_navegador(html: str, start: int) -> str:
+        """Campos do formulário como o parser HTML do navegador os associa.
+
+        O painel aninha formulários ocultos (modais `yw1`…`yw6`) dentro do `taxista-form`.
+        No navegador: um `<form>` aberto enquanto o principal está aberto é ignorado (os campos
+        dele são do principal); o primeiro `</form>` não tira os campos seguintes do principal;
+        e um `<form>` aberto depois disso é um formulário à parte, cujos campos não vão no POST.
+        Parar no primeiro `</form>` cortava o bloco de saldo mínimo e o painel recusava a gravação.
+        """
+        aberto = True
+        inicio_separado: Optional[int] = None
+        separados: List[Tuple[int, int]] = []
+        fim = -1
+        for m in re.finditer(r"<(/?)form\b[^>]*>", html[start + 5 :], re.I):
+            pos = start + 5 + m.start()
+            if not m.group(1):
+                if not aberto and inicio_separado is None:
+                    inicio_separado = pos
+                continue
+            if aberto:
+                aberto = False
+                fim = pos
+            elif inicio_separado is not None:
+                separados.append((inicio_separado, start + 5 + m.end()))
+                inicio_separado = None
+                fim = start + 5 + m.end()
+            else:
+                fim = pos
+        if fim < 0:
+            raise RuntimeError("Fim do formulário taxista não encontrado.")
+        partes: List[str] = []
+        cursor = start
+        for a, b in separados:
+            partes.append(html[cursor:a])
+            cursor = b
+        partes.append(html[cursor:fim])
+        return "".join(partes) + "</form>"
 
     @classmethod
     def parse(
@@ -172,7 +208,9 @@ class _TaxistaFormParser:
                 conteudo = conteudo[1:]
             fields[name].append(conteudo)
 
-        return dict(fields)
+        out = dict(fields)
+        _aplicar_regras_saldo(out)
+        return out
 
     @classmethod
     def list_selects(cls, html: str) -> List[Dict[str, Any]]:
@@ -199,6 +237,37 @@ class _TaxistaFormParser:
                 {"name": name, "options": options, "disabled": _flag(sm.group(1), "disabled")}
             )
         return out
+
+
+# Rádio do bloco de saldo (taxista.js do painel) → campo de valor que decide qual opção vale.
+_REGRAS_SALDO = (
+    ("MpayConfigTaxista[credito_minimo]", "MpayConfigTaxista[vl_saldo_min_corrida_presencial]"),
+    ("MpayConfigTaxista[ativar_mensagens]", "MpayConfigTaxista[vl_saldo_acionar_recarga]"),
+)
+_SALDO_DESATIVADO = "-9999999999.99"
+
+
+def _aplicar_regras_saldo(fields: Dict[str, List[str]]) -> None:
+    """Repete o que o taxista.js faz ao abrir a tela.
+
+    O HTML sempre marca "Seguir o padrão da bandeira" (0); o script escolhe a opção pelo valor:
+    valor preenchido → "personalizar" (1); valor = -9999999999.99 → "desativar" (N); vazio → padrão (0).
+    Fora do "personalizar", o campo de valor fica desabilitado e não vai no POST.
+    """
+    for radio, valor in _REGRAS_SALDO:
+        if radio not in fields:
+            continue
+        atual = (fields.get(valor) or [""])[0].strip()
+        if not atual:
+            escolhido = "0"
+        elif atual == _SALDO_DESATIVADO:
+            escolhido = "N"
+        else:
+            escolhido = "1"
+        # Mantém o hidden vazio do Yii antes do rádio, como o navegador envia.
+        fields[radio] = ["", escolhido] if "" in fields[radio] else [escolhido]
+        if escolhido != "1":
+            fields.pop(valor, None)
 
 
 def _norm_label(s: str) -> str:
