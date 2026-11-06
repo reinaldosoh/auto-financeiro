@@ -15,6 +15,7 @@ Fluxo (o mesmo do vídeo "COBRANÇA ROYALTIES - CENÁRIO 1"):
 from __future__ import annotations
 
 import html as html_lib
+from decimal import ROUND_HALF_UP, Decimal
 import json
 import logging
 import re
@@ -343,7 +344,7 @@ def parse_indicadores(payload: Dict[str, Any]) -> Dict[str, Any]:
     origem = payload.get("origemFinalizada") or {}
     graf_sol = solicitada.get("grafico") or []
     return {
-        "ganhos_gerais": round(parse_numero_br(ganho.get("valor")), 2),
+        "ganhos_gerais": _r2(parse_numero_br(ganho.get("valor"))),
         "ganhos_por_pagamento": {
             (f.get("texto") or "").strip(): parse_numero_br(f.get("quantidade") or f.get("valor"))
             for f in ganho.get("grafico") or []
@@ -694,6 +695,13 @@ NOMES_CENARIO = {
 }
 
 
+def _r2(valor: float) -> float:
+    """Dinheiro: 2 casas, meio centavo para cima (igual ao Excel/conta à mão).
+    round() do Python erra em casos como 2.799,945 (float 2799.94499…) → 2.799,94."""
+    d = Decimal(repr(round(float(valor), 6)))
+    return float(d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
 def _aplicar(base: float, valor: float, tipo: str) -> float:
     return base * (valor / 100.0) if (tipo or "percentual") == "percentual" else valor
 
@@ -707,7 +715,7 @@ def calcular_seguro_app(corridas_finalizadas: float, cfg: Dict[str, Any]) -> Dic
     if taxa <= 0:
         return {"valor": 0.0, "taxa": 0.0, "tipo": tipo, "origem": "nao_configurada"}
     valor = corridas_finalizadas * (taxa / 100.0) if tipo == "percentual" else corridas_finalizadas * taxa
-    valor = round(valor + TARIFA_BOLETO_SEGURO_APP, 2)
+    valor = _r2(valor + TARIFA_BOLETO_SEGURO_APP)
     return {"valor": valor, "taxa": taxa, "tipo": tipo, "origem": "cidade" if usa_cidade else "global"}
 
 
@@ -762,13 +770,13 @@ def calcular_boleto_ubiz(itens_demonstrativo: List[Dict[str, Any]], tabela: Opti
         if chave is None:
             valor = float(it.get("debito") or 0)
             avisos.append(f"Item do demonstrativo sem preço na tabela Ubiz: '{it.get('descricao')}'. Usado o valor da Machine (R$ {valor:.2f}).")
-            linhas.append({"descricao": it.get("descricao"), "chave": None, "quantidade": qtd, "tarifa": None, "valor": round(valor, 2)})
+            linhas.append({"descricao": it.get("descricao"), "chave": None, "quantidade": qtd, "tarifa": None, "valor": _r2(valor)})
         else:
             valor = qtd * tab[chave]
-            linhas.append({"descricao": it.get("descricao"), "chave": chave, "quantidade": qtd, "tarifa": tab[chave], "valor": round(valor, 2)})
+            linhas.append({"descricao": it.get("descricao"), "chave": chave, "quantidade": qtd, "tarifa": tab[chave], "valor": _r2(valor)})
         total += valor
     tarifa = tab["tarifa_boleto"]
-    return {"itens": linhas, "subtotal": round(total, 2), "tarifa_boleto": tarifa, "total": round(total + tarifa, 2), "avisos": avisos}
+    return {"itens": linhas, "subtotal": _r2(total), "tarifa_boleto": tarifa, "total": _r2(total + tarifa), "avisos": avisos}
 
 
 def calcular_cenario(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -837,7 +845,7 @@ def _calcular_cenario_01_02(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Di
     tarifa_boleto = _aplicar(base, float(cfg.get("tarifa_boleto") or 0), cfg.get("tarifa_boleto_tipo") or "fixo")
     valor_final = royalty + tarifa_boleto
 
-    r2 = lambda v: round(v, 2)  # noqa: E731
+    r2 = _r2
     return {
         "cenario": cenario,
         "ganhos_gerais": r2(ganho),
@@ -1065,8 +1073,8 @@ def obter_cartao_liquido(http: requests.Session, bandeira_matriz: str, bandeira_
         valor += parse_numero_br(c[i_val])
         situacoes[c[i_sit]] = situacoes.get(c[i_sit], 0) + 1
         bandeiras[c[i_ban]] = bandeiras.get(c[i_ban], 0) + 1
-    return {"total": round(total, 2), "linhas": len(corpo), "situacoes": situacoes,
-            "valor_corridas": round(valor, 2), "bandeiras_da_corrida": bandeiras}
+    return {"total": _r2(total), "linhas": len(corpo), "situacoes": situacoes,
+            "valor_corridas": _r2(valor), "bandeiras_da_corrida": bandeiras}
 
 
 def obter_vouchers_tickets(http: requests.Session, ano_mes: str) -> Dict[str, Any]:
@@ -1091,7 +1099,7 @@ def obter_vouchers_tickets(http: requests.Session, ano_mes: str) -> Dict[str, An
     i_t, i_v = _coluna(cab, "Ticket"), _coluna(cab, "Voucher")
     ticket = sum(parse_numero_br(c[i_t]) for c in corpo if len(c) > i_t)
     voucher = sum(parse_numero_br(c[i_v]) for c in corpo if len(c) > i_v)
-    return {"ticket": round(ticket, 2), "voucher": round(voucher, 2), "motoristas": len(corpo)}
+    return {"ticket": _r2(ticket), "voucher": _r2(voucher), "motoristas": len(corpo)}
 
 
 _RE_OPCAO_EMPRESA = re.compile(
@@ -1130,8 +1138,8 @@ def somar_faturamento_csv(linhas: List[List[str]]) -> Dict[str, Any]:
         total += parse_numero_br(c[i_t])
         if i_tipo is not None and len(c) > i_tipo:
             tipos[c[i_tipo].strip()] = tipos.get(c[i_tipo].strip(), 0) + 1
-    return {"valor_original": round(orig, 2), "valor_total": round(total, 2),
-            "desconto": round(orig - total, 2), "corridas": n, "tipos": tipos}
+    return {"valor_original": _r2(orig), "valor_total": _r2(total),
+            "desconto": _r2(orig - total), "corridas": n, "tipos": tipos}
 
 
 def obter_eticket_faturamento(http: requests.Session, ano_mes: str) -> Dict[str, Any]:
@@ -1176,8 +1184,8 @@ def obter_eticket_faturamento(http: requests.Session, ano_mes: str) -> Dict[str,
         for k, v in e["tipos"].items():
             tipos[k] = tipos.get(k, 0) + v
     return {
-        "valor_original": round(sum(e["valor_original"] for e in por_empresa), 2),
-        "valor_total": round(sum(e["valor_total"] for e in por_empresa), 2),
+        "valor_original": _r2(sum(e["valor_original"] for e in por_empresa)),
+        "valor_total": _r2(sum(e["valor_total"] for e in por_empresa)),
         "corridas": sum(e["corridas"] for e in por_empresa),
         "tipos": tipos,
         "empresas_consultadas": len(empresas),
@@ -1218,13 +1226,13 @@ def calcular_cenario_03(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
     total_sai = sum(v for _, v in itens_saida)
     base = total_ent - total_sai
     return _fechar_royalty("cenario_03", base, cfg, avisos, {
-        "entradas": [{"item": n, "valor": round(v, 2)} for n, v in itens_entrada],
-        "saidas": [{"item": n, "valor": round(v, 2)} for n, v in itens_saida],
-        "total_entradas": round(total_ent, 2),
-        "total_saidas": round(total_sai, 2),
+        "entradas": [{"item": n, "valor": _r2(v)} for n, v in itens_entrada],
+        "saidas": [{"item": n, "valor": _r2(v)} for n, v in itens_saida],
+        "total_entradas": _r2(total_ent),
+        "total_saidas": _r2(total_sai),
         "seguro_app": seguro["valor"],
         "seguro_app_detalhe": seguro,
-        "valor_bruto": round(total_ent, 2),
+        "valor_bruto": _r2(total_ent),
     })
 
 
@@ -1255,13 +1263,13 @@ def calcular_cenario_04(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
     bruto = tx_central + taxa_cartao
     base = bruto - seguro["valor"]
     return _fechar_royalty("cenario_04", base, cfg, avisos, {
-        "taxa_central_extrato": round(tx_central, 2),
-        "cartao_transacoes": round(cartao_liq, 2),
-        "cartao_no_app_extrato": round(cartao_extrato, 2),
-        "taxa_cartao": round(taxa_cartao, 2),
+        "taxa_central_extrato": _r2(tx_central),
+        "cartao_transacoes": _r2(cartao_liq),
+        "cartao_no_app_extrato": _r2(cartao_extrato),
+        "taxa_cartao": _r2(taxa_cartao),
         "seguro_app": seguro["valor"],
         "seguro_app_detalhe": seguro,
-        "valor_bruto": round(bruto, 2),
+        "valor_bruto": _r2(bruto),
     })
 
 
@@ -1284,13 +1292,13 @@ def _fechar_royalty(cenario: str, base: float, cfg: Dict[str, Any], avisos: List
     return {
         "cenario": cenario,
         **extra,
-        "saldo_01": round(base, 2),
-        "base_royalties": round(base, 2),
+        "saldo_01": _r2(base),
+        "base_royalties": _r2(base),
         "taxa_cidade": taxa_valor,
         "taxa_cidade_tipo": taxa_tipo,
-        "royalty": round(royalty, 2),
-        "tarifa_boleto": round(tarifa, 2),
-        "valor_final": round(royalty + tarifa, 2),
+        "royalty": _r2(royalty),
+        "tarifa_boleto": _r2(tarifa),
+        "valor_final": _r2(royalty + tarifa),
         "avisos": avisos,
     }
 

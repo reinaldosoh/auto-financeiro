@@ -144,13 +144,13 @@ def test_alfenas_outubro_igual_ao_financeiro():
     cfg = {"taxa_valor": 20, "taxa_tipo": "percentual", "taxa_seguro_app": 0.15, "taxa_seguro_app_tipo": "fixo",
            "tarifa_boleto": 3.50, "tarifa_boleto_tipo": "fixo"}
     c = calcular_cenario_01(entradas, cfg)
-    assert c["saldo_01"] == 18978.01
+    assert c["saldo_01"] == 18978.02
     assert c["boleto_ubiz"] == 3739.09            # 8238×0,33 + 3985×0,17 + 206×0,14 + 8073×0,02 + 7465×0,02 + 3,50
     assert c["boleto_machine"] == 3134.97         # só referência
     assert c["seguro_app"] == 1239.20             # 8238×0,15 + 3,50
-    assert c["base_royalties"] == 13999.72
-    assert c["royalty"] == 2799.94
-    assert c["valor_final"] == 2803.44            # financeiro arredondou para 2.803,45
+    assert c["base_royalties"] == 13999.73
+    assert c["royalty"] == 2799.95
+    assert c["valor_final"] == 2803.45            # igual ao financeiro (2.799,945 → meio centavo para cima)
     assert c["avisos"] == []
 
 

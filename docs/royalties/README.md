@@ -23,8 +23,8 @@ saldo_01     = ganhos_gerais × taxa_central%                       126.520,10 �
 boleto_ubiz  = Σ quantidade do Demonstrativo × tabela Ubiz + 3,50   = 3.739,09
 seguro_app   = corridas_finalizadas × taxa_seguro (0,15) + 3,50    = 1.239,20
 base         = saldo_01 − boleto_ubiz − seguro_app                 = 13.999,72
-royalty      = base × % da cidade (20%)                            = 2.799,94
-valor_final  = royalty + tarifa de boleto (3,50)                   = 2.803,44
+royalty      = base × % da cidade (20%)                            = 2.799,95
+valor_final  = royalty + tarifa de boleto (3,50)                   = 2.803,45   (meio centavo para cima, como no Excel)
 ```
 
 ### Cenário 2 (taxa da central FIXA por corrida — ex.: Passos, R$ 2,50)
