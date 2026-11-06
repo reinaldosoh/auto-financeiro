@@ -1094,14 +1094,106 @@ def obter_vouchers_tickets(http: requests.Session, ano_mes: str) -> Dict[str, An
     return {"ticket": round(ticket, 2), "voucher": round(voucher, 2), "motoristas": len(corpo)}
 
 
+_RE_OPCAO_EMPRESA = re.compile(
+    r'<select[^>]*name="FaturamentoFilterForm\[empresa\]"[^>]*>(.*?)</select>', re.S | re.I)
+_RE_OPCAO = re.compile(r'<option[^>]*value="([^"]+)"[^>]*>(.*?)</option>', re.S | re.I)
+
+
+def parse_empresas_faturamento(pagina: str) -> List[Tuple[str, str]]:
+    """Opções do select Empresa em Faturamento por empresa (dependem da central ativa)."""
+    m = _RE_OPCAO_EMPRESA.search(pagina or "")
+    if not m:
+        return []
+    return [(v, html_lib.unescape(re.sub(r"<[^>]+>", "", n)).strip())
+            for v, n in _RE_OPCAO.findall(m.group(1)) if v.strip()]
+
+
+def somar_faturamento_csv(linhas: List[List[str]]) -> Dict[str, Any]:
+    """Soma "Valor original com cupom" (valor cheio, antes do desconto) e "Valor total" do CSV."""
+    if len(linhas) <= 1:
+        return {"valor_original": 0.0, "valor_total": 0.0, "desconto": 0.0, "corridas": 0, "tipos": {}}
+    cab, corpo = linhas[0], linhas[1:]
+    i_o = _coluna(cab, "Valor original com cupom", "Valor original")
+    i_t = _coluna(cab, "Valor total")
+    try:
+        i_tipo = _coluna(cab, "Tipo")
+    except ErroFinanceiro:
+        i_tipo = None
+    orig = total = 0.0
+    tipos: Dict[str, int] = {}
+    n = 0
+    for c in corpo:
+        if len(c) <= max(i_o, i_t):
+            continue
+        n += 1
+        orig += parse_numero_br(c[i_o])
+        total += parse_numero_br(c[i_t])
+        if i_tipo is not None and len(c) > i_tipo:
+            tipos[c[i_tipo].strip()] = tipos.get(c[i_tipo].strip(), 0) + 1
+    return {"valor_original": round(orig, 2), "valor_total": round(total, 2),
+            "desconto": round(orig - total, 2), "corridas": n, "tipos": tipos}
+
+
+def obter_eticket_faturamento(http: requests.Session, ano_mes: str) -> Dict[str, Any]:
+    """
+    Financeiro › Contas a receber › Faturamento por empresa (central ATIVA), empresa por empresa,
+    mês inteiro → exporta CSV → soma "Valor original com cupom" (valor integral, SEM o desconto).
+    Conferido com o financeiro: Mariana 10/2026 = BAR 2.490,31 + GAM 2.560,91 = R$ 5.051,22.
+    O export lê o filtro gravado na sessão: primeiro POST "filtra" com a empresa, depois POST "export"
+    com as datas na query (igual ao sendForm do painel).
+    """
+    ano, mes = validar_ano_mes(ano_mes)
+    ini, fim = f"01/{mes:02d}/{ano}", f"{monthrange(ano, mes)[1]:02d}/{mes:02d}/{ano}"
+    url = BASE_URL + "/financeiro/faturamento/index"
+    hdr = {**_HEADERS_PAGINA, "Referer": url}
+    r = http.get(url, headers=hdr, timeout=60)
+    if _sessao_expirada(r):
+        raise ErroFinanceiro("sessao_expirada", "Sessão da Machine expirou. Faça login novamente.", 401)
+    empresas = parse_empresas_faturamento(r.text)
+    F = "FaturamentoFilterForm"
+    por_empresa: List[Dict[str, Any]] = []
+    for emp_id, emp_nome in empresas:
+        filtro = {f"{F}[first_date]": ini, f"{F}[last_date]": fim, f"{F}[empresa]": emp_id,
+                  f"{F}[payment_type]": "", f"{F}[nome]": "", f"{F}[vtr]": "", "filtra": ""}
+        rf = http.post(url, data=filtro, headers=hdr, timeout=120)
+        if _sessao_expirada(rf):
+            raise ErroFinanceiro("sessao_expirada", "Sessão da Machine expirou. Faça login novamente.", 401)
+        txt = (rf.text or "").lower()
+        if "nenhum resultado encontrado" in txt and "exibindo" not in txt:
+            continue  # empresa sem corrida no mês: não precisa exportar
+        q = {f"{F}[first_date]": ini, f"{F}[last_date]": fim, f"{F}[nome]": "", f"{F}[vtr]": "", "export": ""}
+        re_ = http.post(url, params=q, headers=hdr, timeout=180)
+        if _sessao_expirada(re_):
+            raise ErroFinanceiro("sessao_expirada", "Sessão da Machine expirou. Faça login novamente.", 401)
+        if "csv" not in (re_.headers.get("Content-Type") or "").lower():
+            raise ErroFinanceiro("faturamento_export_falhou",
+                                 f"Exportação do faturamento ({emp_nome}) não devolveu CSV (HTTP {re_.status_code}).")
+        soma = somar_faturamento_csv(_csv_linhas(re_))
+        if soma["corridas"]:
+            por_empresa.append({"empresa_id": emp_id, "empresa": emp_nome, **soma})
+    tipos: Dict[str, int] = {}
+    for e in por_empresa:
+        for k, v in e["tipos"].items():
+            tipos[k] = tipos.get(k, 0) + v
+    return {
+        "valor_original": round(sum(e["valor_original"] for e in por_empresa), 2),
+        "valor_total": round(sum(e["valor_total"] for e in por_empresa), 2),
+        "corridas": sum(e["corridas"] for e in por_empresa),
+        "tipos": tipos,
+        "empresas_consultadas": len(empresas),
+        "por_empresa": por_empresa,
+    }
+
+
 def calcular_cenario_03(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     Cenário 3 (vídeo "COBRANÇA ROYALTIES - CENÁRIO 3"):
       entradas = recarga via Central + recarga via Pix + cupons + desafios + indicações + cashback
                  + cartão no app BRUTO (soma do "Valor líquido da bandeira" das transações)
-                 + eTicket (soma da coluna Ticket em Vouchers e tickets por motoristas)
+                 + eTicket INTEGRAL (Faturamento por empresa, soma do "Valor original com cupom")
       saídas   = saque via Central + saque via Pix + seguro app
-      royalty  = (entradas − saídas) × % da Ubiz
+      royalty  = (entradas − saídas) × % da Ubiz + tarifa de boleto (R$ 3,50)
+    Conferido com o financeiro (Mariana 10/2026): (93.878,59 − 5.564,60) × 30% + 3,50 = R$ 26.497,70.
     O cartão no app e o eTicket do extrato NÃO entram (são o líquido creditado ao motorista).
     """
     ext = entradas["extrato"]
@@ -1114,7 +1206,7 @@ def calcular_cenario_03(entradas: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
         ("Indicações", g("indicacoes")),
         ("Cashback e bônus", g("cashback")),
         ("Cartão no app (transações, líquido da bandeira)", float(entradas["cartao_liquido"])),
-        ("eTicket (vouchers e tickets por motoristas)", float(entradas["eticket"])),
+        ("eTicket (faturamento por empresa, valor integral)", float(entradas["eticket"])),
     ]
     avisos: List[str] = []
     seguro = calcular_seguro_app(float(entradas.get("corridas_finalizadas") or 0), cfg)
@@ -1182,9 +1274,13 @@ def _fechar_royalty(cenario: str, base: float, cfg: Dict[str, Any], avisos: List
     if taxa_valor <= 0:
         avisos.append("Cidade sem % de royalty configurada.")
     royalty = _aplicar(base, taxa_valor, taxa_tipo)
-    # Cenários 3 e 4: o financeiro não somou tarifa de boleto nos vídeos; só soma se a config pedir.
+    # Tarifa de boleto: cenário 3 soma (Mariana conferida), cenário 4 não (Itapetininga conferida).
+    # cfg somar_tarifa_boleto (true/false) sobrescreve o padrão do cenário.
+    somar = cfg.get("somar_tarifa_boleto")
+    if somar is None:
+        somar = cenario == "cenario_03"
     tarifa = _aplicar(base, float(cfg.get("tarifa_boleto") or 0), cfg.get("tarifa_boleto_tipo") or "fixo") \
-        if cfg.get("somar_tarifa_boleto") else 0.0
+        if somar else 0.0
     return {
         "cenario": cenario,
         **extra,
@@ -1249,9 +1345,12 @@ def coletar_cidade_extrato(
     }
     vouchers, filtro = None, None
     if cenario == "cenario_03":
-        vouchers = obter_vouchers_tickets(http, ano_mes)
-        marca("vouchers")
-        entradas["eticket"] = vouchers["ticket"]
+        vouchers = obter_eticket_faturamento(http, ano_mes)
+        marca("eticket_faturamento")
+        entradas["eticket"] = vouchers["valor_original"]
+        outros = {k: v for k, v in vouchers["tipos"].items() if k.lower() != "eticket"}
+        if outros:
+            avisos.append(f"Faturamento por empresa trouxe corridas que não são eTicket {outros}: entraram no eTicket.")
     if cenario in ("cenario_03", "cenario_04"):
         try:
             if erro_filtro:
@@ -1268,7 +1367,7 @@ def coletar_cidade_extrato(
     return {
         "extrato": extrato,
         "cartao": cartao,
-        "vouchers": vouchers,
+        "eticket_faturamento": vouchers,
         "consultar_corridas": filtro,
         "avisos": avisos,
         "tempos_s": tempos,

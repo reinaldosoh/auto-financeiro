@@ -203,7 +203,7 @@ class CfgCidade(BaseModel):
     tarifa_boleto: float = 3.50
     tarifa_boleto_tipo: Literal["percentual", "fixo"] = "fixo"
     somar_tarifa_boleto: Optional[bool] = Field(
-        None, description="Cenários 3 e 4: somar a tarifa de boleto no final (padrão: não)"
+        None, description="Cenários 3 e 4: somar a tarifa de boleto no final (padrão: cenário 3 soma, cenário 4 não)"
     )
     descontar_seguro: Optional[bool] = Field(
         None, description="Padrão: desconta no cenário 01, não desconta no cenário 02"

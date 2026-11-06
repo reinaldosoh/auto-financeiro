@@ -230,7 +230,36 @@ def test_cenario_03_mariana_video():
     assert c["total_saidas"] == round(1307.88 + 153.50, 2)
     assert c["base_royalties"] == round(87724.25 - 1461.38, 2)
     assert c["royalty"] == round(c["base_royalties"] * 0.10, 2)
-    assert c["tarifa_boleto"] == 0 and c["valor_final"] == c["royalty"]   # sem tarifa por padrão
+    assert c["tarifa_boleto"] == 3.5 and c["valor_final"] == round(c["royalty"] + 3.5, 2)  # cenário 3 soma a tarifa
+
+
+def test_cenario_03_mariana_outubro_igual_ao_financeiro():
+    """Conferido com o financeiro (Mariana 10/2026): eTicket INTEGRAL 5.051,22 e tarifa 3,50 → R$ 26.497,70."""
+    extrato = {"recarga_central": 1286.12, "recarga_pix": 59444.21, "cupom": 1770.23, "cashback": 1716,
+               "saque_pix": 727.65, "ticket": 4710.15, "cartao": 21180.45, "tx_central": 89423.9}
+    e = {"cenario": "cenario_03", "extrato": extrato, "cartao_liquido": 24610.81, "eticket": 5051.22,
+         "corridas_finalizadas": 32223}
+    c = calcular_cenario(e, {"taxa_valor": 30, "taxa_seguro_app": 0.15, "taxa_seguro_app_tipo": "fixo", "tarifa_boleto": 3.5})
+    assert c["total_entradas"] == 93878.59
+    assert c["total_saidas"] == 5564.60
+    assert c["base_royalties"] == 88313.99
+    assert c["valor_final"] == 26497.70
+
+
+def test_faturamento_empresa_soma_valor_original():
+    from machine_financeiro_http import somar_faturamento_csv, parse_empresas_faturamento
+    cab = ("Data e Hora;OS;Tipo;Série/Número;VTR;Motorista;Centro de custo;Nome do passageiro;Nome de cadastro;"
+           "Telefone do passageiro;Telefone de cadastro;Partida;Destino;Valor original com cupom;Desconto;Valor total;Observação")
+    linhas = [cab.split(";"),
+              "01/10/2026;1;eTicket;;158;MATHEUS;Geral;A;B;1;2;X;Y;R$ 36,95;R$ 1,85;R$ 35,10;".split(";"),
+              "02/10/2026;2;eTicket;;158;MATHEUS;Geral;A;B;1;2;X;Y;R$ 1.033,40;R$ 0,00;R$ 1.033,40;".split(";")]
+    r = somar_faturamento_csv(linhas)
+    assert r["valor_original"] == 1070.35 and r["valor_total"] == 1068.50 and r["desconto"] == 1.85
+    assert r["corridas"] == 2 and r["tipos"] == {"eTicket": 2}
+    html = ('<select name="FaturamentoFilterForm[empresa]" id="FaturamentoFilterForm_empresa">'
+            '<option value="">Selecione</option><option value="58801">BAR EMPREENDIMENTOS ALIMENT&Iacute;CIOS</option>'
+            '<option value="58799">GAM</option></select>')
+    assert parse_empresas_faturamento(html) == [("58801", "BAR EMPREENDIMENTOS ALIMENTÍCIOS"), ("58799", "GAM")]
 
 
 def test_cenario_04_taxa_central_mais_taxa_cartao():

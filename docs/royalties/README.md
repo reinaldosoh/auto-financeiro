@@ -50,10 +50,13 @@ alguns a menos (Passos 10/2026: Painel 5.096, filtro 5.098 → R$ 1.072,56 confe
 ```
 entradas = recarga via Central + recarga via Pix + cupons + desafios + indicações + cashback
          + cartão no app BRUTO (Transações com cartão: soma do "Valor líquido da bandeira")
-         + eTicket (Vouchers e tickets por motoristas: soma da coluna Ticket)
+         + eTicket INTEGRAL (Faturamento por empresa, empresa por empresa: soma do "Valor original com cupom")
 saídas   = saque via Central + saque via Pix + seguro app (corridas finalizadas × taxa + 3,50)
-royalty  = (entradas − saídas) × % da Ubiz          (sem tarifa de boleto; somar_tarifa_boleto=true liga)
+royalty  = (entradas − saídas) × % da Ubiz + tarifa de boleto (3,50)
 ```
+Conferido: Mariana 10/2026 = (93.878,59 − 5.564,60) × 30% + 3,50 = R$ 26.497,70. O eTicket usa o valor
+**sem desconto** (BAR 2.490,31 + GAM 2.560,91 = 5.051,22). "Vouchers e tickets por motoristas" e o
+"Valor total" do faturamento trazem o valor com desconto (5.011,55) e não servem.
 O "Cartão no App" e o "eTicket" do extrato **não** entram: são o líquido creditado ao motorista.
 
 ### Cenário 4 (taxa da central + taxa do cartão)
@@ -61,7 +64,7 @@ O "Cartão no App" e o "eTicket" do extrato **não** entram: são o líquido cre
 ```
 taxa do cartão = Transações com cartão (líquido da bandeira) − "Cartão no App" do extrato
 base           = Taxa da central do extrato + taxa do cartão − seguro app (corridas × taxa + 3,50)
-royalty        = base × % da Ubiz                (sem tarifa de boleto)
+royalty        = base × % da Ubiz                (sem tarifa de boleto; somar_tarifa_boleto=true liga)
 ```
 Conferido: Itapetininga 10/2026 = (1.296,72 − 68,00) × 30% = R$ 368,62.
 
@@ -71,7 +74,7 @@ Conferido: Itapetininga 10/2026 = (1.296,72 − 68,00) × 30% = R$ 368,62.
 |---|---|---|
 | Extrato (abas C/B/R/S) | `GET /machinePay/obterExtratoMotoristas?tipo=C\|B\|R\|S&periodo=LM` (ou `CT` + `data_ini/data_fim` em `aaaa-mm-dd`) → `response.estatisticas` | cidade |
 | Transações com cartão | `POST /cartao/exportTransacaoExcel` (`PagamentoSolicitacaoFilterForm`, `bandeira_corrida_id`, situação paga+disputa+chargeback, `export`) → CSV | matriz |
-| Vouchers e tickets | `POST /financeiro/voucherTicketTaxista/index` (`TaxistaFilterForm[first_date/last_date]`, `export`) → CSV | cidade |
+| eTicket (faturamento por empresa) | `GET /financeiro/faturamento/index` (lista de empresas) → por empresa: `POST` com `FaturamentoFilterForm[...]` + `filtra` (grava o filtro na sessão) → `POST ?FaturamentoFilterForm[first_date/last_date]&export` → CSV, soma "Valor original com cupom" | cidade |
 
 Os CSVs dizem UTF-8 mas vêm em Latin-1 (`;`). O export de transações não devolve meses muito antigos.
 
